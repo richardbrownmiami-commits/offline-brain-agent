@@ -82,12 +82,14 @@ import androidx.compose.material.icons.filled.AccessTime
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.TaskAlt
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material3.AssistChip
@@ -305,7 +307,7 @@ internal fun ChatScreen(feature: ChatViewModel, settings: AppSettings) {
         bottomBar = {
             Surface(color = AppBackground, tonalElevation = 4.dp, modifier = Modifier.fillMaxWidth().imePadding()) {
                 Row(
-                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp).testTag("chat_input_bar"),
+                    Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 4.dp).testTag("chat_input_bar"),
                     verticalAlignment = Alignment.Bottom, horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
                     IconButton(onClick = { picker.launch(arrayOf("application/pdf")) }) { Icon(Icons.Filled.AttachFile, contentDescription = "Attach a PDF") }
@@ -348,14 +350,11 @@ internal fun ChatScreen(feature: ChatViewModel, settings: AppSettings) {
     ) { insets ->
         Column(Modifier.fillMaxSize().padding(insets)) {
             AccessibilityOffBanner(vm)
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 14.dp).testTag("chat_quick_actions"), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                AssistChip(onClick = { vm.send("what notifications did I get") }, modifier = Modifier.testTag("chat_quick_action_notifications"), label = { Text("Notifications") })
-            }
             if (messages.isNotEmpty()) {
                 TextButton(onClick = {
                     val transcript = messages.joinToString("\n\n") { "${if (it.role == "user") "You" else "Assistant"}: ${it.text}" }.take(200_000)
                     copyChatText(context, "Conversation", transcript, onResult = { notice = it })
-                }, modifier = Modifier.align(Alignment.End).padding(end = 12.dp)) { Text("Copy whole conversation") }
+                }, modifier = Modifier.align(Alignment.End).padding(end = 12.dp).testTag("chat_copy_conversation")) { Text("Copy whole conversation") }
             }
             if (macroRecording) {
                 Card(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 4.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF302A3A)), shape = RoundedCornerShape(16.dp)) {
@@ -557,7 +556,7 @@ private fun MessageBubble(
             colors = CardDefaults.cardColors(containerColor = if (isUser) Color(0xFF34334A) else SurfaceDark),
             shape = RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = if (isUser) 18.dp else 5.dp, bottomEnd = if (isUser) 5.dp else 18.dp)
         ) {
-            Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+            Column(Modifier.padding(horizontal = 12.dp, vertical = 7.dp)) {
                 when (reply) {
                     is BrainReply.DeviceStatusCard -> DeviceStatusCardContent(reply, fontScale)
                     is BrainReply.NotificationSummaryCard -> NotificationSummaryCardContent(reply)
@@ -571,12 +570,16 @@ private fun MessageBubble(
                     if (showCleaned) SelectionContainer { Text(cleanedText, fontSize = (13f * fontScale / 100f).sp, lineHeight = (18f * fontScale / 100f).sp) }
                     TextButton(onClick = onAskDocument) { Text("Ask a question about this document") }
                 }
-                Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                    TextButton(onClick = onCopy) { Text("Copy") }
-                    TextButton(onClick = onShare) { Text("Share") }
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onCopy, modifier = Modifier.size(36.dp).testTag("message_copy")) {
+                        Icon(Icons.Filled.ContentCopy, contentDescription = "Copy message", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    }
+                    IconButton(onClick = onShare, modifier = Modifier.size(36.dp).testTag("message_share")) {
+                        Icon(Icons.Filled.Share, contentDescription = "Share message", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                    }
+                    Spacer(Modifier.weight(1f))
+                    Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.timestamp)), fontSize = 10.sp, color = Muted)
                 }
-                Spacer(Modifier.height(5.dp))
-                Text(DateFormat.getTimeInstance(DateFormat.SHORT).format(Date(message.timestamp)), fontSize = 10.sp, color = Muted, modifier = Modifier.align(Alignment.End))
             }
         }
     }

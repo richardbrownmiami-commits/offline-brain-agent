@@ -5,6 +5,7 @@ import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -21,17 +22,18 @@ import org.junit.runner.RunWith
 class Round5ComposeAcceptanceTest {
     @get:Rule val composeRule = createAndroidComposeRule<MainActivity>()
 
-    @Test fun chatQuickActionRowShowsOnlyNotifications() {
-        composeRule.onNodeWithText("Chat").performClick()
-        composeRule.onNodeWithTag("chat_quick_actions").assertIsDisplayed()
-        composeRule.onNodeWithTag("chat_quick_action_notifications").assertIsDisplayed()
+    @Test fun chatUsesDashboardShortcutAndNoExtraNotificationChip() {
+        composeRule.onNodeWithText("Home").performClick()
+        composeRule.onNodeWithTag("dashboard_open_chat").performClick()
+        assertTrue(composeRule.onAllNodesWithTag("chat_quick_actions").fetchSemanticsNodes().isEmpty())
+        composeRule.onNodeWithText("Notifications", substring = false).assertIsDisplayed()
         assertTrue(composeRule.onAllNodesWithText("Weather", substring = false).fetchSemanticsNodes().isEmpty())
         assertTrue(composeRule.onAllNodesWithText("News", substring = false).fetchSemanticsNodes().isEmpty())
         assertTrue(composeRule.onAllNodesWithText("Alarm", substring = false).fetchSemanticsNodes().isEmpty())
     }
 
-    @Test fun toolsShowsRefreshableDeviceStatusCard() {
-        composeRule.onNodeWithText("Tools").performClick()
+    @Test fun homeShowsRefreshableDeviceStatusCard() {
+        composeRule.onNodeWithText("Home").performClick()
         composeRule.onNodeWithText("Device status · this phone", substring = false).assertExists()
         composeRule.onNodeWithText("Refresh", substring = false).assertExists()
         composeRule.waitUntil(5_000) {

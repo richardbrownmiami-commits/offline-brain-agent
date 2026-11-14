@@ -111,11 +111,11 @@ internal val MutedText = Color(0xFFAAA9B6)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun FeatureScaffold(title: String, onBack: () -> Unit, content: @Composable (androidx.compose.foundation.layout.PaddingValues) -> Unit) {
+fun FeatureScaffold(title: String, onBack: () -> Unit, showBack: Boolean = true, content: @Composable (androidx.compose.foundation.layout.PaddingValues) -> Unit) {
     Scaffold(
         containerColor = Dark,
         contentWindowInsets = androidx.compose.foundation.layout.WindowInsets(0, 0, 0, 0),
-        topBar = { CenterAlignedTopAppBar(title = { Text(title) }, navigationIcon = { TextButton(onClick = onBack) { Text("Back") } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = Dark)) },
+        topBar = { CenterAlignedTopAppBar(title = { Text(title) }, navigationIcon = { if (showBack) TextButton(onClick = onBack) { Text("Back") } }, colors = TopAppBarDefaults.topAppBarColors(containerColor = Dark)) },
         content = content
     )
 }

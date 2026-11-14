@@ -56,6 +56,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -163,6 +164,7 @@ import com.cue.offlinebrain.device.DeviceStatusProvider
 import com.cue.offlinebrain.diagnostics.DiagnosticResult
 import com.cue.offlinebrain.ui.RestoreRecoveryScreen
 import com.cue.offlinebrain.ui.ChatScreen
+import com.cue.offlinebrain.ui.DashboardScreen
 import com.cue.offlinebrain.ui.AlarmsScreen
 import com.cue.offlinebrain.ui.NotesScreen
 import com.cue.offlinebrain.ui.DiagnosticsScreen
@@ -371,22 +373,23 @@ private fun OfflineBrainApp(
             } else {
         val nav = rememberNavController()
         val entry by nav.currentBackStackEntryAsState()
-        val current = entry?.destination?.route ?: "chat"
+        val current = entry?.destination?.route ?: "home"
         LaunchedEffect(settings.selfCheckSeen, current) {
             if (settings.selfCheckSeen && current == "self-check") {
-                nav.navigate("chat") { popUpTo("self-check") { inclusive = true }; launchSingleTop = true }
+                nav.navigate("home") { popUpTo("self-check") { inclusive = true }; launchSingleTop = true }
             }
         }
         Scaffold(
             containerColor = AppBackground,
             contentWindowInsets = WindowInsets(0, 0, 0, 0),
             bottomBar = {
-                NavigationBar(containerColor = SurfaceDark, modifier = Modifier.navigationBarsPadding().testTag("bottom_navigation")) {
-                    NavigationBarItem(selected = current == "chat", onClick = { nav.navigate("chat") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.Home, null) }, label = { Text("Chat") })
-                    NavigationBarItem(selected = current == "alarms", onClick = { nav.navigate("alarms") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.AccessTime, null) }, label = { Text("Alarms") })
-                    NavigationBarItem(selected = current == "notifications", onClick = { nav.navigate("notifications") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.Notifications, null) }, label = { Text("Notifications") })
-                    NavigationBarItem(selected = current in setOf("tools", "phrases", "automation", "floating", "notes", "clipboard"), onClick = { nav.navigate("tools") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.TaskAlt, null) }, label = { Text("Tools") })
-                    NavigationBarItem(selected = current == "settings" || current.startsWith("settings/") || current in setOf("diagnostics", "privacy"), onClick = { nav.navigate("settings") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.Settings, null) }, label = { Text("Settings") })
+                if (current != "chat" || !WindowInsets.isImeVisible) {
+                    NavigationBar(containerColor = SurfaceDark, modifier = Modifier.navigationBarsPadding().testTag("bottom_navigation")) {
+                        NavigationBarItem(selected = current in setOf("home", "chat"), onClick = { nav.navigate("home") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.Home, null) }, label = { Text("Home") })
+                        NavigationBarItem(selected = current == "notifications", onClick = { nav.navigate("notifications") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.Notifications, null) }, label = { Text("Notifications") })
+                        NavigationBarItem(selected = current == "settings" || current.startsWith("settings/") || current in setOf("alarms", "diagnostics", "privacy"), onClick = { nav.navigate("settings") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.Settings, null) }, label = { Text("Settings") })
+                        NavigationBarItem(selected = current in setOf("tools", "phrases", "automation", "floating", "notes", "clipboard"), onClick = { nav.navigate("tools") { launchSingleTop = true; popUpTo(nav.graph.findStartDestination().id) { saveState = true }; restoreState = true } }, icon = { Icon(Icons.Filled.TaskAlt, null) }, label = { Text("Tools") })
+                    }
                 }
             }
         ) { padding ->
@@ -396,16 +399,18 @@ private fun OfflineBrainApp(
                         vm = vm,
                         onTryInput = { vm.setting { markSelfCheckSeen() }; nav.navigate("chat") { popUpTo("self-check") { inclusive = true }; launchSingleTop = true } },
                         onPermissions = { nav.navigate("settings") },
-                        onContinue = { vm.setting { markSelfCheckSeen() }; nav.navigate("chat") { popUpTo("self-check") { inclusive = true }; launchSingleTop = true } }
+                        onContinue = { vm.setting { markSelfCheckSeen() }; nav.navigate("home") { popUpTo("self-check") { inclusive = true }; launchSingleTop = true } }
                     )
                 }
+                composable("home") { DashboardScreen(vm = vm, onOpenChat = { nav.navigate("chat") { launchSingleTop = true } }) }
                 composable("chat") { ChatScreen(chatFeature, settings) }
                 composable("alarms") { AlarmsScreen(alarmFeature, settings) { nav.popBackStack() } }
                 composable("notes") { NotesScreen(vm) { nav.popBackStack() } }
                 composable("settings") {
                     SettingsHomeScreen(onSelect = { section ->
                         val destination = when (section) {
-                            "alarms", "notifications", "tools", "privacy", "diagnostics" -> section
+                            "alarms", "tools", "privacy", "diagnostics" -> section
+                            "notifications" -> "settings/notifications"
                             else -> "settings/$section"
                         }
                         nav.navigate(destination) { launchSingleTop = true }
@@ -414,6 +419,7 @@ private fun OfflineBrainApp(
                 composable("settings/{section}") { backStackEntry ->
                     val section = backStackEntry.arguments?.getString("section").orEmpty()
                     when (section) {
+                        "notifications" -> NotificationsScreen(notificationFeature, settings) { nav.popBackStack() }
                         "appearance" -> AppearanceSettingsScreen(vm, settings) { nav.popBackStack() }
                         "voice" -> VoiceSettingsScreen(voiceFeature, settings) { nav.popBackStack() }
                         "online" -> OnlineSettingsScreen(vm, settings) { nav.popBackStack() }
