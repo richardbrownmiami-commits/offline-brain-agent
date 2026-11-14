@@ -1,0 +1,4 @@
+<resources>
+    <string name="app_name">Offline Brain Agent</string>
+    <string name="accessibility_description">Carries out screen actions you request. Screen labels and typed text are captured only while you explicitly record a macro, kept in memory until you stop, and saved only if you save the macro. Fields marked as passwords are skipped. Do not record private information.</string>
+</resources>

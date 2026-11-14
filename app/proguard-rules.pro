@@ -1,0 +1,13 @@
+-keepattributes Signature,*Annotation*,InnerClasses,EnclosingMethod
+-keep class androidx.room.** { *; }
+-keep class com.tom_roush.pdfbox.** { *; }
+-keep class org.vosk.** { *; }
+-keep class net.sqlcipher.** { *; }
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_text_common.** { *; }
+-keep class com.google.android.gms.internal.mlkit_vision_text.** { *; }
+-keep class com.google.android.gms.internal.mlkit_common.** { *; }
+-keepattributes SourceFile,LineNumberTable
+-dontwarn org.vosk.**
+-dontwarn com.tom_roush.pdfbox.**

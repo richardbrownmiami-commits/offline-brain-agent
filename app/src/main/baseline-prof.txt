@@ -1,0 +1,3 @@
+HSPLcom/cue/offlinebrain/MainActivity;->onCreate(Landroid/os/Bundle;)V
+HSPLcom/cue/offlinebrain/ui/BrainViewModel;-><init>(Landroid/app/Application;)V
+HSPLcom/cue/offlinebrain/data/BrainDatabase$Companion;->get(Landroid/content/Context;)Lcom/cue/offlinebrain/data/BrainDatabase;
