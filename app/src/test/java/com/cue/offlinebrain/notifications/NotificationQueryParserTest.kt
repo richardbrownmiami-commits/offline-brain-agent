@@ -19,10 +19,25 @@ class NotificationQueryParserTest {
         assertTrue(parsed("what notifications did I get").query.category == null)
     }
 
-    @Test fun atLeastFortyPositivePhrasesAcrossAllCategories() {
+    @Test fun allFiftyTwoPositivePhrasesAreRetainedAndParse() {
         val examples = NotificationQueryRegressionCases.positivePhrases
-        assertTrue("Need 40+ distinct cases", examples.distinct().size >= 40)
+        assertEquals("Keep every established phrase exactly once", 52, examples.distinct().size)
         examples.forEach { assertTrue("Should parse: $it", NotificationQueryParser.parse(it) is NotificationQueryParser.Outcome.Parsed) }
+    }
+
+    @Test fun fiftyNaturalSentencesScoreToExpectedIntent() {
+        val examples = NotificationQueryRegressionCases.naturalSentences
+        assertEquals("Keep the 50-sentence natural-language set complete", 50, examples.size)
+        assertEquals("Natural-language examples should be distinct", 50, examples.map { it.text }.distinct().size)
+        examples.forEach { example ->
+            val result = NotificationQueryParser.parse(example.text)
+            assertTrue("Should parse: ${example.text}; got $result", result is NotificationQueryParser.Outcome.Parsed)
+            val query = (result as NotificationQueryParser.Outcome.Parsed).query
+            assertEquals("Category for ${example.text}", example.category, query.category)
+            assertEquals("Action for ${example.text}", example.action, query.action)
+            assertEquals("Unread modifier for ${example.text}", example.unreadOnly, query.unreadOnly)
+            assertEquals("Today modifier for ${example.text}", example.todayOnly, query.todayOnly)
+        }
     }
 
     @Test fun supportsModifiersAndBoundedMetadata() {
@@ -37,7 +52,8 @@ class NotificationQueryParserTest {
 
     @Test fun ambiguousAndInvalidInputFailsClosed() {
         assertTrue(NotificationQueryParser.parse("show calls music notification") is NotificationQueryParser.Outcome.Clarify)
-        assertTrue(NotificationQueryParser.parse("show blargh notification") is NotificationQueryParser.Outcome.Rejected)
+        assertTrue(NotificationQueryParser.parse("show blargh notification") is NotificationQueryParser.Outcome.Parsed)
+        assertTrue(NotificationQueryParser.parse("show blargh") is NotificationQueryParser.Outcome.Rejected)
         assertTrue(NotificationQueryParser.parse("") is NotificationQueryParser.Outcome.Rejected)
         assertTrue(NotificationQueryParser.parse("notification") is NotificationQueryParser.Outcome.Parsed)
         assertTrue(NotificationQueryParser.parse("show notifications from") is NotificationQueryParser.Outcome.Rejected)
@@ -49,10 +65,10 @@ class NotificationQueryParserTest {
         category("sho calls", NotificationQueryParser.Category.CALLS) // distance 1: show
         category("shw clls", NotificationQueryParser.Category.CALLS) // distance 2 for each command/category token
         assertTrue(NotificationQueryParser.parse("shoo calls").let { it is NotificationQueryParser.Outcome.Parsed && it.query.action == NotificationQueryParser.Action.SHOW })
-        assertTrue(NotificationQueryParser.parse("shoooo calls") is NotificationQueryParser.Outcome.Rejected) // distance 3
+        assertTrue(NotificationQueryParser.parse("shoooo calls").let { it is NotificationQueryParser.Outcome.Parsed && it.query.action == NotificationQueryParser.Action.SHOW }) // distance 3 is ignored as an extra word
         assertTrue(NotificationQueryParser.parse("shw cals") is NotificationQueryParser.Outcome.Parsed)
         assertTrue(NotificationQueryParser.parse("mesage notification") is NotificationQueryParser.Outcome.Parsed)
         assertTrue(NotificationQueryParser.parse("messa notification") is NotificationQueryParser.Outcome.Clarify)
-        assertTrue(NotificationQueryParser.parse("show mxxxages notification") is NotificationQueryParser.Outcome.Rejected)
+        assertTrue(NotificationQueryParser.parse("show mxxxages notification") is NotificationQueryParser.Outcome.Parsed)
     }
 }

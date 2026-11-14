@@ -487,7 +487,12 @@ class DiagnosticsRunner(context: Context) {
 
     private fun overlayCheck(): String {
         val granted = runCatching { Build.VERSION.SDK_INT < 23 || Settings.canDrawOverlays(appContext) }.getOrDefault(false)
-        return "UNTESTED — overlay permission is ${if (granted) "granted" else "not granted"}; this report does not start a floating button. Use Tools → Floating button → Show bubble for 10 seconds to test it explicitly."
+        val overlay = com.cue.offlinebrain.overlay.OverlayDiagnostics.snapshot()
+        return when {
+            overlay.viewAttached -> "PASS — the floating ComposeView is attached; overlay permission is ${if (granted) "granted" else "not granted"}."
+            !overlay.lastError.isNullOrBlank() -> "FAIL — the last floating-view attach attempt failed with ${overlay.lastError}; overlay permission is ${if (granted) "granted" else "not granted"}. Use Tools → Floating button → Show bubble for 10 seconds to retry."
+            else -> "UNTESTED — overlay permission is ${if (granted) "granted" else "not granted"}; no attach error has been recorded. Use Tools → Floating button → Show bubble for 10 seconds to test it explicitly."
+        }
     }
 
     private suspend fun workerStates(): String = withContext(Dispatchers.IO) {
@@ -585,7 +590,7 @@ class DiagnosticsRunner(context: Context) {
         val liveCapture = (appContext as? OfflineBrainApplication)?.settings?.settings?.first()?.notificationLiveCaptureEnabled ?: false
         if (!enabled) return "FAIL — Notification Access is off; live capture is ${if (liveCapture) "on" else "off"}. Enable access in Android's Notification access settings."
         if (NotificationAccessState.connected) return "PASS — notification listener is connected; live capture is ${if (liveCapture) "on" else "off"}."
-        NotificationAccessState.requestRebind(appContext)
+        NotificationAccessState.repair(appContext)
         repeat(10) {
             delay(500)
             if (NotificationAccessState.connected) return "PASS — notification listener reconnected; live capture is ${if (liveCapture) "on" else "off"}."

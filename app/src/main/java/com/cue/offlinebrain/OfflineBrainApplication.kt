@@ -6,6 +6,7 @@ import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import com.cue.offlinebrain.data.AppLockLifecycle
 import com.cue.offlinebrain.data.BrainDatabase
+import com.cue.offlinebrain.data.BrainRepository
 import com.cue.offlinebrain.data.EncryptedBackup
 import com.cue.offlinebrain.data.SettingsStore
 import com.cue.offlinebrain.diagnostics.CrashLog
@@ -28,6 +29,7 @@ import java.util.concurrent.TimeUnit
 class OfflineBrainApplication : Application() {
     val database by lazy { BrainDatabase.get(this) }
     val settings by lazy { SettingsStore(this) }
+    val repository by lazy { BrainRepository(applicationContext, database, settings) }
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _restoreRecoveryError = MutableStateFlow<String?>(null)
     val restoreRecoveryError: StateFlow<String?> = _restoreRecoveryError.asStateFlow()

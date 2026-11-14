@@ -49,7 +49,25 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
     private val summarizer = ExtractiveSummarizer()
     private val resumeParser = ResumeDocumentParser()
     @Volatile private var launcherAppCache: Pair<Long, List<InstalledCommandApp>>? = null
+    @Volatile private var lastNotificationContext: NotificationFollowUpContext? = null
+    private val READ_ONLY_STATUS_REQUESTS = setOf(
+        DeviceStatusProvider.Request.SUMMARY, DeviceStatusProvider.Request.STORAGE, DeviceStatusProvider.Request.RAM,
+        DeviceStatusProvider.Request.BATTERY, DeviceStatusProvider.Request.CHARGING, DeviceStatusProvider.Request.NETWORK,
+        DeviceStatusProvider.Request.VOLUME, DeviceStatusProvider.Request.BRIGHTNESS, DeviceStatusProvider.Request.PHONE_MODEL,
+        DeviceStatusProvider.Request.ANDROID_VERSION, DeviceStatusProvider.Request.UPTIME, DeviceStatusProvider.Request.TEMPERATURE,
+        DeviceStatusProvider.Request.INSTALLED_APPS, DeviceStatusProvider.Request.NETWORK_OPERATOR, DeviceStatusProvider.Request.IP_ADDRESS
+    )
     private val commandCandidate = Regex("(?i)^\\s*(?:open|launch|start|search|find|look\\s+for|type|write|tap|click|press|scroll|go\\s+back|go\\s+home|go\\s+to|back|home|call|play|send)\\b")
+
+    private enum class NotificationFollowUpKind { WHY, MORE, DETAILS, AGAIN }
+
+    private data class NotificationFollowUpContext(
+        val query: NotificationQueryParser.Query,
+        val category: String?,
+        val resultCount: Int,
+        val latestAt: Long?,
+        val appName: String?
+    )
 
     suspend fun seedFaqs() {
         db.dao().seedFaqs(listOf(
@@ -61,9 +79,47 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         ))
     }
 
-    suspend fun handle(text: String, onStep: (String) -> Unit = {}): String = handle(text, allowAutomation = true, allowLearned = true, onStep = onStep)
+    suspend fun handle(text: String, onStep: (String) -> Unit = {}): BrainReply {
+        val normalized = text.trim()
+        if (normalized.isBlank()) return BrainReply.Text("Type a request and I'll try a matching local skill.")
 
-    private suspend fun handle(text: String, allowAutomation: Boolean, allowLearned: Boolean, onStep: (String) -> Unit): String = withContext(Dispatchers.IO) {
+        val followUp = notificationFollowUpKind(normalized)
+        val previous = lastNotificationContext
+        if (followUp != null && previous != null) {
+            if (followUp == NotificationFollowUpKind.WHY) return BrainReply.Text(explainPreviousNotificationAnswer(previous))
+            val repeatedQuery = when (followUp) {
+                NotificationFollowUpKind.AGAIN -> previous.query
+                NotificationFollowUpKind.MORE, NotificationFollowUpKind.DETAILS -> previous.query.copy(
+                    action = if (previous.query.action == NotificationQueryParser.Action.READ ||
+                        previous.query.action == NotificationQueryParser.Action.TELL || !previous.query.contact.isNullOrBlank())
+                        previous.query.action else NotificationQueryParser.Action.LIST
+                )
+                NotificationFollowUpKind.WHY -> previous.query
+            }
+            return handleNotificationQuestion(normalized, NotificationQueryParser.Outcome.Parsed(repeatedQuery))
+        }
+
+        val notificationQuery = NotificationQueryParser.parse(normalized)
+        if (shouldRouteNotification(normalized, notificationQuery)) {
+            lastNotificationContext = null
+            return handleNotificationQuestion(normalized, notificationQuery)
+        }
+        lastNotificationContext = null
+
+        val volumeCommand = VolumeCommandParser.parse(normalized)
+        if (volumeCommand != VolumeCommand.NotCommand) {
+            val result = withContext(Dispatchers.Main) { DeviceStatusProvider.applyVolumeCommand(context, volumeCommand) }
+            return if (volumeCommand == VolumeCommand.Read) deviceStatusCard("Media volume", result) else BrainReply.Text(result)
+        }
+        DeviceStatusProvider.classify(normalized)?.let { request ->
+            val result = withContext(Dispatchers.Main) { DeviceStatusProvider.reply(context, request, normalized) }
+            return if (request in READ_ONLY_STATUS_REQUESTS) deviceStatusCard(statusTitle(request), result) else BrainReply.Text(result)
+        }
+
+        return brainReplyFromLegacyText(handleLegacy(normalized, allowAutomation = true, allowLearned = true, onStep = onStep))
+    }
+
+    private suspend fun handleLegacy(text: String, allowAutomation: Boolean, allowLearned: Boolean, onStep: (String) -> Unit): String = withContext(Dispatchers.IO) {
         val prefs = settings.settings.first()
         val normalized = text.trim()
         if (normalized.isBlank()) return@withContext "Type a request and I'll try a matching local skill."
@@ -87,7 +143,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
                 "From the saved document (extractive source sentences):\n$answer"
         }
         val notificationQuery = NotificationQueryParser.parse(normalized)
-        if (shouldRouteNotification(normalized, notificationQuery)) return@withContext handleNotificationQuestion(normalized, notificationQuery)
+        if (shouldRouteNotification(normalized, notificationQuery)) return@withContext handleNotificationQuestion(normalized, notificationQuery).plainText
         val volumeCommand = VolumeCommandParser.parse(normalized)
         if (volumeCommand != VolumeCommand.NotCommand) {
             return@withContext withContext(Dispatchers.Main) { DeviceStatusProvider.applyVolumeCommand(context, volumeCommand) }
@@ -117,7 +173,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
             val rule = db.dao().enabledAutomationRules().firstOrNull { request.contains(it.triggerPhrase, ignoreCase = true) }
             if (rule != null && !rule.actionText.equals(normalized, ignoreCase = true)) {
                 CrashLog.record("AUTOMATION", "user rule matched id=${rule.id}")
-                return@withContext handle(rule.actionText, allowAutomation = false, allowLearned = true, onStep = onStep)
+                return@withContext handleLegacy(rule.actionText, allowAutomation = false, allowLearned = true, onStep = onStep)
             }
         }
 
@@ -222,7 +278,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         "news" -> { settings.rememberContext("news"); requestWithCache(WorkerCacheKeys.headlines(prefs.newsFeed)) { publicSkills.headlines(prefs.newsFeed) } }
         "notifications" -> {
             val query = "what notifications did I get"
-            handleNotificationQuestion(query, NotificationQueryParser.parse(query))
+            handleNotificationQuestion(query, NotificationQueryParser.parse(query)).plainText
         }
         "alarm" -> {
             val request = engine.classify("alarm ${text.replace(phrase.phrase, "", ignoreCase = true)}", defaultCity = prefs.defaultCity)
@@ -243,23 +299,23 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         "open_app" -> {
             val target = phrase.argument.ifBlank { text.substringAfter(phrase.phrase, "").trim() }
             if (target.isBlank()) "This phrase needs an app name. Edit it and enter the app to open." else
-                handle("open $target", allowAutomation = false, allowLearned = false, onStep = onStep)
+                handleLegacy("open $target", allowAutomation = false, allowLearned = false, onStep = onStep)
         }
         "command", "search" -> {
             val command = phrase.argument.trim()
             if (command.isBlank()) "Edit this phrase and enter one chat command first." else {
                 onStep("Running the saved command")
-                handle(command, allowAutomation = false, allowLearned = false, onStep = onStep)
+                handleLegacy(command, allowAutomation = false, allowLearned = false, onStep = onStep)
             }
         }
         "device_status" -> {
             onStep("Checking this phone's device status")
-            handle("device status", allowAutomation = false, allowLearned = false, onStep = onStep)
+            handleLegacy("device status", allowAutomation = false, allowLearned = false, onStep = onStep)
         }
         "note" -> {
             val noteText = phrase.argument.trim()
             if (noteText.isBlank()) "Edit this phrase and enter the note text first." else
-                handle("remember $noteText", allowAutomation = false, allowLearned = false, onStep = onStep)
+                handleLegacy("remember $noteText", allowAutomation = false, allowLearned = false, onStep = onStep)
         }
         "chain" -> {
             val steps = PhraseChainParser.parse(phrase.argument)
@@ -267,7 +323,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
                 val results = mutableListOf<String>()
                 for ((index, command) in steps.withIndex()) {
                     onStep("Phrase chain: step ${index + 1} of ${steps.size}")
-                    val result = handle(command, allowAutomation = false, allowLearned = false, onStep = onStep)
+                    val result = handleLegacy(command, allowAutomation = false, allowLearned = false, onStep = onStep)
                     results += "${index + 1}. $result"
                     if (MacroRunPolicy.isFailureReply(result)) {
                         results += "Stopped here; later actions were not run."
@@ -298,7 +354,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
                     findMacro = { id -> db.dao().macroById(id) },
                     runChatCommand = { command ->
                         onStep("${macro.name}: handling a typed request")
-                        val answer = handle(command, allowAutomation = false, allowLearned = false, onStep = onStep)
+                        val answer = handleLegacy(command, allowAutomation = false, allowLearned = false, onStep = onStep)
                         results += answer
                         answer
                     },
@@ -328,13 +384,13 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         "Live lookup failed. Showing the cached result saved at $savedAt instead:\n\n${cached.content}"
     }
 
-    private suspend fun handleNotificationQuestion(text: String, outcome: NotificationQueryParser.Outcome): String {
+    private suspend fun handleNotificationQuestion(text: String, outcome: NotificationQueryParser.Outcome): BrainReply {
         val permission = notificationPermissionStatus()
         if (permission == false) CrashLog.record("NOTIFICATIONS", "query requested while listener is enabled but not connected; using saved database rows")
         val query = when (outcome) {
             is NotificationQueryParser.Outcome.Parsed -> outcome.query
-            is NotificationQueryParser.Outcome.Clarify -> return "I found more than one possible notification meaning (${outcome.candidates.sorted().joinToString(", ")}). Try naming one category, such as SMS, Chat, Calls, or Social."
-            is NotificationQueryParser.Outcome.Rejected -> return "I couldn't safely understand that notification request (${outcome.reason}). Try “show SMS notifications”, “read system notifications”, or “any new notifications”."
+            is NotificationQueryParser.Outcome.Clarify -> return BrainReply.Text("I found more than one possible notification meaning (${outcome.candidates.sorted().joinToString(", ")}). Try naming one category, such as SMS, Chat, Calls, or Social.")
+            is NotificationQueryParser.Outcome.Rejected -> return BrainReply.Text("I couldn't safely understand that notification request (${outcome.reason}). Try “show SMS notifications”, “read system notifications”, or “any new notifications”.")
         }
         val category = query.category?.let(::notificationCategoryName)
         val appRows = if (query.fromApp.isNullOrBlank()) emptyList() else db.dao().notificationPackageCounts()
@@ -345,7 +401,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         }
         if (query.fromApp != null && appMatches.size > 1) {
             val labels = appMatches.take(5).joinToString(", ") { PackageLabelResolver.label(context, it.packageName) }
-            return "I found more than one app matching “${query.fromApp}”: $labels. Please use the full app name."
+            return BrainReply.Text("I found more than one app matching “${query.fromApp}”: $labels. Please use the full app name.")
         }
         val targetPackage = appMatches.singleOrNull()?.packageName
         val sinceSeen = if (query.unreadOnly) NotificationLastSeenStore.lastSeen(context, category) else 0L
@@ -378,10 +434,54 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         }
         val includeMessageBody = query.action == NotificationQueryParser.Action.READ ||
             query.action == NotificationQueryParser.Action.TELL || !query.contact.isNullOrBlank()
-        val result = if (found.isEmpty()) empty else formatNotificationQueryResults(found, category, includeMessageBody)
         val prefs = settings.settings.first()
-        val captureNote = if (prefs.notificationLiveCaptureEnabled) "" else "\n\nLive capture is off; these are saved local records only."
-        return withNotificationAccessNote(result, permission) + captureNote
+        val notes = buildList {
+            if (found.isEmpty()) add(empty)
+            when (permission) {
+                true -> Unit
+                false -> add("Android's notification listener is disconnected. These results come from saved local records; check Settings → Diagnostics.")
+                null -> add("Notification Access is off. I searched only saved local records; enable it in Settings to collect new notifications.")
+            }
+            if (!prefs.notificationLiveCaptureEnabled) add("Live capture is off; these are saved local records only.")
+        }
+        val note = notes.distinct().joinToString("\n\n")
+        val title = when {
+            category != null -> "$category notifications"
+            appName != null -> "Notifications from $appName"
+            !query.contact.isNullOrBlank() -> "Notifications mentioning ${query.contact}"
+            else -> "Saved notifications"
+        }
+        val latestAt = found.maxOfOrNull { it.postedAt }
+        val unreadCount = found.count { !it.isRead }
+        val categoryCounts = if (category == null) counts.map { ReplyCategoryCount(it.category, it.count) }
+            else found.groupingBy { it.category }.eachCount().map { ReplyCategoryCount(it.key, it.value) }.sortedByDescending { it.count }
+                .ifEmpty { listOf(ReplyCategoryCount(category, 0)) }
+        lastNotificationContext = NotificationFollowUpContext(query, category, found.size, latestAt, appName)
+
+        if (query.action in setOf(NotificationQueryParser.Action.SHOW, NotificationQueryParser.Action.ANY,
+                NotificationQueryParser.Action.OPEN, NotificationQueryParser.Action.WHAT_IN)) {
+            return BrainReply.NotificationSummaryCard(title, category, found.size, unreadCount, latestAt, categoryCounts, note)
+        }
+
+        val grouped = found.groupBy { row ->
+            if (row.category == "Music and media") "media\u0000${row.packageName}\u0000${row.title}"
+            else listOf(row.packageName, row.title, row.text, row.category).joinToString("\u0000")
+        }.values.mapNotNull { group -> group.maxByOrNull { it.postedAt }?.let { latest -> latest to group.size } }
+            .sortedByDescending { it.first.postedAt }.take(12)
+        val items = grouped.map { (row, repeatedCount) ->
+            ReplyNotificationItem(
+                id = row.id,
+                packageName = row.packageName,
+                title = row.title.ifBlank { PackageLabelResolver.label(context, row.packageName) },
+                text = if (includeMessageBody) row.text else "",
+                category = row.category,
+                postedAt = row.postedAt,
+                groupName = row.groupName,
+                duplicateCount = repeatedCount,
+                isRead = row.isRead
+            )
+        }
+        return BrainReply.NotificationList(title, category, found.size, unreadCount, latestAt, categoryCounts, items, note)
     }
 
     private fun notificationCategoryName(category: NotificationQueryParser.Category): String = when (category) {
@@ -399,29 +499,6 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         NotificationQueryParser.Category.FINANCE -> "Finance"
     }
 
-    private fun formatNotificationQueryResults(rows: List<NotificationEntity>, category: String?, includeMessageBody: Boolean): String {
-        val counts = rows.groupingBy { it.category }.eachCount().toList().sortedByDescending { it.second }.take(5)
-            .joinToString(" · ") { "${it.first} ${it.second}" }
-        val grouped = rows.groupBy { row ->
-            if (row.category == "Music and media") "media\u0000${row.packageName}\u0000${row.title}"
-            else listOf(row.packageName, row.title, row.text, row.category).joinToString("\u0000")
-        }
-            .values.mapNotNull { group -> group.maxByOrNull { it.postedAt }?.let { latest -> latest to group.size } }
-            .sortedByDescending { it.first.postedAt }.take(12)
-        val lines = grouped.joinToString("\n") { (row, count) ->
-            val sender = row.title.ifBlank { PackageLabelResolver.label(context, row.packageName) }
-            if (count > 1 && row.category == "Music and media") {
-                "$sender ×$count, latest ${java.text.DateFormat.getTimeInstance(java.text.DateFormat.SHORT).format(java.util.Date(row.postedAt))}"
-            } else {
-                val group = row.groupName.takeIf { it.isNotBlank() && row.category == "Chat" }?.let { "$it — " }.orEmpty()
-                val detail = NotificationPrivacyFormatter.line(row.category, sender, row.text, includeMessageBody)
-                "• $group$detail · ${relativeNotificationTime(row.postedAt)}"
-            }
-        }
-        val title = category?.let { "$it notifications" } ?: "Saved notifications"
-        return "$title (${rows.size}; $counts):\n$lines"
-    }
-
     private fun relativeNotificationTime(atMillis: Long): String {
         val age = (System.currentTimeMillis() - atMillis).coerceAtLeast(0L)
         val minutes = age / 60_000L
@@ -435,7 +512,7 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
 
     private fun withNotificationAccessNote(result: String, access: Boolean?): String = when (access) {
         true -> result
-        false -> "$result\n\nNotification Access is enabled, but Android's listener is disconnected. I requested a rebind; saved results may be old. Check Settings → Diagnostics."
+        false -> "$result\n\nNotification Access is enabled, but Android's listener is disconnected. I did not start a rebind from this query; check Settings → Diagnostics."
         null -> "$result\n\nNotification Access is off. I searched only saved local records; enable it in Settings to collect new notifications."
     }
 
@@ -445,8 +522,95 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
             .onFailure { CrashLog.record("NOTIFICATIONS", "listener permission query failed", it) }.getOrDefault(false)
         if (!enabled) return null
         if (NotificationAccessState.connected) return true
-        if (Build.VERSION.SDK_INT >= 24) NotificationAccessState.repair(context)
         return false
+    }
+
+    private fun notificationFollowUpKind(value: String): NotificationFollowUpKind? {
+        val normalized = value.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
+            .replace(Regex("\\s+"), " ").trim()
+        return when (normalized) {
+            "why", "why is that", "why did you say that", "explain", "explain that" -> NotificationFollowUpKind.WHY
+            "more", "tell me more", "more details" -> NotificationFollowUpKind.MORE
+            "details", "show details", "give me details", "full details" -> NotificationFollowUpKind.DETAILS
+            "again", "repeat", "do that again", "say that again", "show that again" -> NotificationFollowUpKind.AGAIN
+            else -> null
+        }
+    }
+
+    private fun explainPreviousNotificationAnswer(previous: NotificationFollowUpContext): String {
+        val subject = previous.category?.let { "$it notifications" }
+            ?: previous.appName?.let { "notifications from $it" }
+            ?: previous.query.contact?.let { "notifications mentioning $it" }
+            ?: "saved notifications"
+        val countText = if (previous.resultCount == 0) "I didn't find a matching saved item" else
+            "I found ${previous.resultCount} matching saved item${if (previous.resultCount == 1) "" else "s"}"
+        val filters = buildList {
+            if (previous.query.unreadOnly) add("unread only")
+            if (previous.query.todayOnly) add("today only")
+            previous.query.fromApp?.takeIf(String::isNotBlank)?.let { add("from $it") }
+        }
+        val filterText = filters.takeIf { it.isNotEmpty() }?.joinToString(", ")?.let { " with the filter $it" }.orEmpty()
+        val latestText = previous.latestAt?.let {
+            " The newest matching item was saved ${java.text.DateFormat.getDateTimeInstance(java.text.DateFormat.SHORT, java.text.DateFormat.SHORT).format(java.util.Date(it))}."
+        }.orEmpty()
+        return "$countText for $subject$filterText in the notifications already saved on this phone.$latestText I didn't use Wikipedia or search the web, and notification data can't tell me why someone sent an alert."
+    }
+
+    private fun statusTitle(request: DeviceStatusProvider.Request): String = when (request) {
+        DeviceStatusProvider.Request.SUMMARY -> "Device status"
+        DeviceStatusProvider.Request.STORAGE -> "Storage"
+        DeviceStatusProvider.Request.RAM -> "Memory"
+        DeviceStatusProvider.Request.BATTERY -> "Battery"
+        DeviceStatusProvider.Request.CHARGING -> "Charging"
+        DeviceStatusProvider.Request.NETWORK -> "Network"
+        DeviceStatusProvider.Request.VOLUME -> "Media volume"
+        DeviceStatusProvider.Request.BRIGHTNESS -> "Screen brightness"
+        DeviceStatusProvider.Request.PHONE_MODEL -> "Phone model"
+        DeviceStatusProvider.Request.ANDROID_VERSION -> "Android version"
+        DeviceStatusProvider.Request.UPTIME -> "Phone uptime"
+        DeviceStatusProvider.Request.TEMPERATURE -> "Battery temperature"
+        DeviceStatusProvider.Request.INSTALLED_APPS -> "Installed apps"
+        DeviceStatusProvider.Request.NETWORK_OPERATOR -> "Mobile-network operator"
+        DeviceStatusProvider.Request.IP_ADDRESS -> "Local network address"
+        else -> "Device status"
+    }
+
+    private fun deviceStatusCard(title: String, text: String): BrainReply.DeviceStatusCard {
+        val lines = text.lines().map(String::trim).filter(String::isNotBlank)
+            .filterNot { it.equals("Device status", ignoreCase = true) }
+        val rows = lines.map { line ->
+            val pieces = line.split(':', limit = 2)
+            val label = pieces.firstOrNull().orEmpty().trim().ifBlank { title }
+            val value = pieces.getOrNull(1)?.trim()?.trimEnd('.') ?: line.trim().trimEnd('.')
+            DeviceStatusRow(label, value, statusProgressPercent(value))
+        }
+        return BrainReply.DeviceStatusCard(title, rows.ifEmpty { listOf(DeviceStatusRow(title, text.trim())) })
+    }
+
+    private fun statusProgressPercent(value: String): Int? {
+        Regex("(\\d{1,3})\\s*%").find(value)?.groupValues?.getOrNull(1)?.toIntOrNull()?.let { return it.coerceIn(0, 100) }
+        val quantities = Regex("(\\d+(?:\\.\\d+)?)\\s*(B|KB|MB|GB|TB)", RegexOption.IGNORE_CASE)
+            .findAll(value).take(2).mapNotNull { match ->
+                val amount = match.groupValues[1].toDoubleOrNull() ?: return@mapNotNull null
+                val unit = match.groupValues[2].uppercase(Locale.ROOT)
+                val scale = when (unit) { "B" -> 1.0; "KB" -> 1_000.0; "MB" -> 1_000_000.0; "GB" -> 1_000_000_000.0; else -> 1_000_000_000_000.0 }
+                amount * scale
+            }.toList()
+        if (quantities.size >= 2 && quantities[1] > 0.0) return ((quantities[0] / quantities[1]) * 100).toInt().coerceIn(0, 100)
+        val pair = Regex("(\\d+(?:\\.\\d+)?)\\s+of\\s+(\\d+(?:\\.\\d+)?)", RegexOption.IGNORE_CASE).find(value)
+            ?: return null
+        val current = pair.groupValues[1].toDoubleOrNull() ?: return null
+        val maximum = pair.groupValues[2].toDoubleOrNull() ?: return null
+        return if (maximum > 0.0) ((current / maximum) * 100).toInt().coerceIn(0, 100) else null
+    }
+
+    suspend fun savedNotificationCount(): Int = withContext(Dispatchers.IO) { db.dao().notificationRowCount() }
+    suspend fun pruneLocalHistory(before: Long) = withContext(Dispatchers.IO) {
+        db.dao().deleteNotificationsBefore(before)
+        db.dao().deleteClipboardBefore(before)
+    }
+    suspend fun saveBackgroundCache(key: String, content: String) = withContext(Dispatchers.IO) {
+        db.dao().putWorkerCache(WorkerCacheEntity(key, content.take(4_000)))
     }
 
     private fun formatNotifications(found: List<NotificationEntity>, emptyMessage: String, includeMessageBody: Boolean = false): String = if (found.isEmpty()) emptyMessage else {
@@ -475,7 +639,6 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
 
     suspend fun summarizePdf(uri: Uri, onProgress: (String) -> Unit = {}): String = withContext(Dispatchers.IO) { documents.pdf(uri, onProgress) }
     suspend fun summarizeWebUrl(url: String): String = withContext(Dispatchers.IO) { documents.web(url) }
-    suspend fun searchNotes(query: String): List<NoteEntity> = withContext(Dispatchers.IO) { query.lowercase(Locale.ROOT).let { emptyList() } }
 
     private fun installedCommandApps(): List<InstalledCommandApp> {
         val now = System.currentTimeMillis()

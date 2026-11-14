@@ -38,6 +38,9 @@ import com.cue.offlinebrain.data.AppLockStateStore
 import com.cue.offlinebrain.data.PinLockStore
 import com.cue.offlinebrain.data.BrainRepository
 import com.cue.offlinebrain.data.MessageEntity
+import com.cue.offlinebrain.data.BrainReply
+import com.cue.offlinebrain.data.BrainReplyCodec
+import com.cue.offlinebrain.data.brainReplyFromLegacyText
 import com.cue.offlinebrain.data.NoteEntity
 import com.cue.offlinebrain.diagnostics.CrashLog
 import com.cue.offlinebrain.diagnostics.DiagnosticAlarmReceiver
@@ -82,7 +85,7 @@ data class MacroRunFailure(val macro: MacroEntity, val stepIndex: Int, val stepC
 
 class BrainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as OfflineBrainApplication
-    private val repository = BrainRepository(application, app.database, app.settings)
+    private val repository = app.repository
     private val diagnosticsRunner = DiagnosticsRunner(application)
     private val voiceController by lazy { VoskSpeechController(application) }
     private val androidSpeechController by lazy { AndroidSpeechInputController(application) }
@@ -180,16 +183,16 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
             var answerForSpeech: String? = null
             try {
                 val answer = withContext(Dispatchers.IO) { repository.handle(value, onStep = { progress -> _step.value = progress }) }
-                if (recordingAtSend) { if (_macroRecording.value) addTemporaryMacroMessage("assistant", answer) }
-                else app.database.dao().addMessage(MessageEntity(role = "assistant", text = answer))
-                if (speakReply) answerForSpeech = answer
+                if (recordingAtSend) { if (_macroRecording.value) addTemporaryMacroMessage("assistant", answer.plainText) }
+                else app.database.dao().addMessage(MessageEntity(role = "assistant", text = answer.plainText, replyJson = BrainReplyCodec.encode(answer)))
+                if (speakReply) answerForSpeech = answer.plainText
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (e: Exception) {
-                val answer = "I couldn't complete that: ${e.message ?: "please check your connection or input"}."
-                if (recordingAtSend) { if (_macroRecording.value) addTemporaryMacroMessage("assistant", answer) }
-                else app.database.dao().addMessage(MessageEntity(role = "assistant", text = answer))
-                if (speakReply) answerForSpeech = answer
+                val answer = BrainReply.Text("I couldn't complete that: ${e.message ?: "please check your connection or input"}.")
+                if (recordingAtSend) { if (_macroRecording.value) addTemporaryMacroMessage("assistant", answer.plainText) }
+                else app.database.dao().addMessage(MessageEntity(role = "assistant", text = answer.plainText, replyJson = BrainReplyCodec.encode(answer)))
+                if (speakReply) answerForSpeech = answer.plainText
             } finally {
                 _working.value = false
                 _step.value = null
@@ -211,12 +214,14 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
         activeJob = viewModelScope.launch {
             try {
                 val summary = repository.summarizePdf(uri) { progress -> _step.value = progress }
-                app.database.dao().addMessage(MessageEntity(role = "assistant", text = summary))
+                val reply = brainReplyFromLegacyText(summary)
+                app.database.dao().addMessage(MessageEntity(role = "assistant", text = reply.plainText, replyJson = BrainReplyCodec.encode(reply)))
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
                 CrashLog.record("PDF", "PDF summary failed", error)
-                app.database.dao().addMessage(MessageEntity(role = "assistant", text = "I couldn't summarize that PDF: ${error.message ?: error.javaClass.simpleName}"))
+                val reply = BrainReply.Text("I couldn't summarize that PDF: ${error.message ?: error.javaClass.simpleName}")
+                app.database.dao().addMessage(MessageEntity(role = "assistant", text = reply.plainText, replyJson = BrainReplyCodec.encode(reply)))
             } finally {
                 _working.value = false
                 _step.value = null
@@ -610,8 +615,8 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
                     runChatCommand = { command ->
                         app.database.dao().addMessage(MessageEntity(role = "user", text = "[${macro.name}] $command"))
                         val answer = withContext(Dispatchers.IO) { repository.handle(command) }
-                        app.database.dao().addMessage(MessageEntity(role = "assistant", text = answer))
-                        answer
+                        app.database.dao().addMessage(MessageEntity(role = "assistant", text = answer.plainText, replyJson = BrainReplyCodec.encode(answer)))
+                        answer.plainText
                     },
                     speakText = { text -> VoiceSpeechOutput.speakOnce(getApplication(), text) },
                     onProgress = { progress -> _step.value = "${progress.macroName}: step ${progress.stepIndex + 1} of ${progress.stepCount}" },

@@ -16,45 +16,45 @@ import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
-import okhttp3.Request
 import org.json.JSONObject
 import org.vosk.Model
 import org.vosk.Recognizer
 import java.io.File
 import java.io.FileOutputStream
-import java.util.concurrent.TimeUnit
 import java.util.zip.ZipInputStream
 import kotlin.coroutines.coroutineContext
 
-/** Downloads only after a user taps the microphone. Model and recognizer live only during recording. */
+/** Extracts the bundled model only after a user taps the microphone; recording resources remain session-scoped. */
 class VoskSpeechController(context: Context) {
     private val appContext = context.applicationContext
-    private val client = OkHttpClient.Builder().connectTimeout(20, TimeUnit.SECONDS).readTimeout(60, TimeUnit.SECONDS).callTimeout(30, TimeUnit.MINUTES).build()
     fun modelDirectory(): File = File(appContext.filesDir, MODEL_DIRECTORY)
 
     suspend fun ensureModel(onProgress: (Int) -> Unit): File = withContext(Dispatchers.IO) {
+        val modelDir = modelDirectory()
+        if (isValidModel(modelDir)) { onProgress(100); return@withContext modelDir }
+        val archive = File(appContext.cacheDir, "$MODEL_DIRECTORY.zip")
+        val staging = File(appContext.filesDir, "$MODEL_DIRECTORY.installing")
         try {
-            val modelDir = modelDirectory()
-            if (isValidModel(modelDir)) { onProgress(100); return@withContext modelDir }
-            val archive = File(appContext.filesDir, "$MODEL_DIRECTORY.zip.part")
-            val offset = if (archive.isFile) archive.length() else 0L
-            val request = Request.Builder().url(MODEL_URL).apply { if (offset > 0) header("Range", "bytes=$offset-") }.build()
-            CrashLog.record("VOICE", "user-started Vosk model download offset=$offset")
-            client.newCall(request).execute().use { response ->
-                if (!response.isSuccessful && response.code != 206) throw IllegalStateException("Model download returned HTTP ${response.code}")
-                val append = offset > 0 && response.code == 206
-                val body = response.body ?: throw IllegalStateException("Model download returned no data")
-                val total = response.header("Content-Range")?.substringAfterLast('/')?.toLongOrNull() ?: if (body.contentLength() > 0) body.contentLength() + if (append) offset else 0 else -1L
-                var transferred = if (append) offset else 0L
-                body.byteStream().use { input -> FileOutputStream(archive, append).use { output ->
+            CrashLog.record("VOICE", "preparing bundled Vosk English model")
+            onProgress(5)
+            archive.delete()
+            appContext.assets.open(MODEL_ASSET_NAME).use { input ->
+                FileOutputStream(archive).use { output ->
                     val buffer = ByteArray(64 * 1024)
-                    while (true) { coroutineContext.ensureActive(); val count = input.read(buffer); if (count < 0) break; output.write(buffer, 0, count); transferred += count; if (total > 0) onProgress(((transferred * 100) / total).toInt().coerceIn(0, 99)) }
+                    var copied = 0L
+                    while (true) {
+                        coroutineContext.ensureActive()
+                        val count = input.read(buffer)
+                        if (count < 0) break
+                        output.write(buffer, 0, count)
+                        copied += count
+                        onProgress((5 + copied / (768L * 1024L)).toInt().coerceIn(5, 65))
+                    }
                     output.fd.sync()
-                } }
+                }
             }
-            if (archive.length() < 1_000_000L) throw IllegalStateException("Downloaded model archive is unexpectedly small")
-            val staging = File(appContext.filesDir, "$MODEL_DIRECTORY.installing"); staging.deleteRecursively()
+            if (archive.length() < 1_000_000L) throw IllegalStateException("Bundled offline model archive is unexpectedly small")
+            staging.deleteRecursively()
             if (!staging.mkdirs()) throw IllegalStateException("Could not create model directory")
             try {
                 ZipInputStream(archive.inputStream().buffered()).use { zip ->
@@ -69,13 +69,14 @@ class VoskSpeechController(context: Context) {
                         zip.closeEntry(); entry = zip.nextEntry
                     }
                 }
-                if (!isValidModel(staging)) throw IllegalStateException("Downloaded archive does not contain expected Vosk English model files")
-                modelDir.deleteRecursively(); if (!staging.renameTo(modelDir)) throw IllegalStateException("Could not finalize downloaded Vosk model")
-                archive.delete(); onProgress(100); CrashLog.record("VOICE", "Vosk English model installed"); modelDir
+                if (!isValidModel(staging)) throw IllegalStateException("Bundled archive does not contain expected Vosk English model files")
+                modelDir.deleteRecursively(); if (!staging.renameTo(modelDir)) throw IllegalStateException("Could not finalize bundled Vosk model")
+                onProgress(100); CrashLog.record("VOICE", "bundled Vosk English model installed"); modelDir
             } catch (e: CancellationException) { staging.deleteRecursively(); throw e }
             catch (e: Exception) { staging.deleteRecursively(); CrashLog.record("VOICE", "Vosk model extraction failed", e); throw e }
         } catch (e: CancellationException) { throw e }
-        catch (e: Exception) { CrashLog.record("VOICE", "Vosk model download or install failed", e); throw e }
+        catch (e: Exception) { CrashLog.record("VOICE", "bundled Vosk model setup failed", e); throw e }
+        finally { archive.delete() }
     }
 
     suspend fun listen(modelDirectory: File, stop: Deferred<Unit>, onStarted: () -> Unit): String = withContext(Dispatchers.IO) {
@@ -125,5 +126,5 @@ class VoskSpeechController(context: Context) {
     }
     private fun parseText(json: String): String = runCatching { JSONObject(json).optString("text").trim() }.getOrDefault("")
     private fun isValidModel(directory: File): Boolean = File(directory, "am/final.mdl").isFile && File(directory, "conf/model.conf").isFile && File(directory, "graph/Gr.fst").isFile
-    companion object { private const val SAMPLE_RATE = 16_000; private const val MODEL_DIRECTORY = "vosk-model-small-en-us-0.15"; private const val MODEL_URL = "https://alphacephei.com/vosk/models/vosk-model-small-en-us-0.15.zip" }
+    companion object { private const val SAMPLE_RATE = 16_000; private const val MODEL_DIRECTORY = "vosk-model-small-en-us-0.15"; private const val MODEL_ASSET_NAME = "$MODEL_DIRECTORY.zip" }
 }

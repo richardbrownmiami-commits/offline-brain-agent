@@ -25,23 +25,36 @@ object NotificationQueryParser {
     }
 
     private val categoryWords = mapOf(
-        Category.MESSAGES_SMS to setOf("text", "sms", "message", "messages"),
-        Category.CHAT to setOf("chat", "whatsapp", "telegram"),
-        Category.CALLS to setOf("call", "calls", "missed"),
-        Category.SYSTEM to setOf("system", "android", "phone"),
-        Category.MUSIC_AND_MEDIA to setOf("music", "media", "youtube"),
-        Category.SOCIAL to setOf("social"), Category.EMAIL to setOf("email"),
-        Category.WEATHER to setOf("weather"), Category.SHOPPING to setOf("shopping"),
-        Category.FOOD to setOf("food"), Category.GAMES to setOf("games"), Category.FINANCE to setOf("finance")
+        Category.MESSAGES_SMS to setOf("text", "texts", "sms", "message", "messages", "messaging"),
+        Category.CHAT to setOf("chat", "chats", "whatsapp", "telegram", "conversation", "conversations"),
+        Category.CALLS to setOf("call", "calls", "missed", "ring", "phonecall", "phonecalls"),
+        Category.SYSTEM to setOf("system", "android", "phone", "device"),
+        Category.MUSIC_AND_MEDIA to setOf("music", "media", "youtube", "video", "videos", "song", "songs", "audio", "stream"),
+        Category.SOCIAL to setOf("social", "instagram", "facebook", "twitter", "reddit", "posts", "tweet", "tweets"),
+        Category.EMAIL to setOf("email", "emails", "mail", "inbox", "gmail"),
+        Category.WEATHER to setOf("weather", "forecast"),
+        Category.SHOPPING to setOf("shopping", "shop", "order", "orders", "delivery"),
+        Category.FOOD to setOf("food", "restaurant", "restaurants", "swiggy", "zomato"),
+        Category.GAMES to setOf("game", "games", "gaming"),
+        Category.FINANCE to setOf("finance", "bank", "banking", "payment", "payments", "transaction", "transactions")
     )
     private val actionWords = mapOf(
-        Action.SHOW to setOf("show"), Action.READ to setOf("read"), Action.TELL to setOf("tell"),
-        Action.LIST to setOf("list"), Action.WHAT_IN to setOf("what", "in"),
-        Action.ANY to setOf("any"), Action.OPEN to setOf("open")
+        Action.SHOW to setOf("show", "display", "see", "find", "check"),
+        Action.READ to setOf("read", "play"),
+        Action.TELL to setOf("tell", "explain", "summarize", "describe"),
+        Action.LIST to setOf("list", "enumerate"),
+        Action.WHAT_IN to setOf("what", "in"),
+        Action.ANY to setOf("any"),
+        Action.OPEN to setOf("open")
     )
-    private val vocabulary = (categoryWords.values.flatten() + actionWords.values.flatten() + setOf("new", "unread", "today", "from", "notification", "notifications", "did", "send", "sent", "me", "about", "is", "are", "the", "what's", "whats", "i", "get", "got", "received", "have")).toSet()
-    private val filler = setOf("me", "about", "the", "a", "an", "my", "please", "notification", "notifications", "did", "send", "sent", "is", "are", "what", "in", "what's", "whats", "i", "get", "got", "received", "have")
-
+    private val modifiers = setOf("new", "unread", "today")
+    private val ignoredWords = setOf(
+        "me", "my", "the", "a", "an", "please", "did", "do", "does", "send", "sent", "say", "said",
+        "get", "got", "received", "receive", "have", "has", "had", "about", "is", "are", "was", "were",
+        "all", "for", "of", "on", "at", "to", "and", "or", "i", "you", "your", "with", "from", "whether",
+        "notification", "notifications", "what's", "whats", "what", "who", "how", "when", "where", "which", "why", "there", "in", "recent", "latest", "newest",
+        "last", "most", "please", "could", "would", "can", "showing", "getting", "gotten"
+    )
     fun parse(input: String): Outcome {
         val raw = input.trim()
         if (raw.isEmpty()) return Outcome.Rejected("Empty query")
@@ -63,45 +76,107 @@ object NotificationQueryParser {
             RegexOption.IGNORE_CASE
         ).find(raw)
         val fromApp = appMatch?.groupValues?.getOrNull(1)?.takeIf { it.length in 1..48 }
+            ?.takeUnless { it.equals("today", ignoreCase = true) }
         if (Regex("\\bfrom\\b", RegexOption.IGNORE_CASE).containsMatchIn(raw) && appMatch == null) {
             return Outcome.Rejected("Invalid app filter")
         }
-        val withoutApp = if (appMatch != null) raw.removeRange(appMatch.range) else raw
+        val withoutApp = if (appMatch != null && fromApp != null) raw.removeRange(appMatch.range) else raw
         val normalized = withoutApp.lowercase().replace("what's", "what is").replace(Regex("\\bwhats\\b"), "what is")
             .replace(Regex("[^\\p{L}\\p{N}']+"), " ").trim()
         if (normalized.isEmpty()) return Outcome.Rejected("Empty query")
-        val rawTokens = normalized.split(Regex("\\s+")).filter(String::isNotBlank)
-        val replacements = mutableMapOf<String, String>()
-        for (token in rawTokens) {
-            if (token in vocabulary || token in filler) continue
-            val near = vocabulary.map { it to distance(token, it, 2) }.filter { it.second <= 2 }
-            if (near.isEmpty()) return Outcome.Rejected("Unrecognized term: $token")
-            val best = near.minOf { it.second }
-            val choices = near.filter { it.second == best }.map { it.first }.toSet()
-            val matchedCategories = choices.mapNotNull { word -> categoryWords.entries.firstOrNull { word in it.value }?.key }
-            if (choices.isNotEmpty() && matchedCategories.size == choices.size && matchedCategories.distinct().size == 1) {
-                replacements[token] = categoryWords[matchedCategories.first()]?.firstOrNull() ?: choices.first()
+        val tokens = normalized.split(Regex("\\s+")).filter(String::isNotBlank)
+        val categoryScores = mutableMapOf<Category, Int>()
+        val exactCategoryCandidates = linkedSetOf<Category>()
+        val actionScores = mutableMapOf<Action, Int>()
+        var unreadOnly = false
+        var todayOnly = false
+        for (token in tokens) {
+            if (token in modifiers) {
+                if (token in setOf("new", "unread")) unreadOnly = true
+                if (token == "today") todayOnly = true
                 continue
             }
-            if (choices.size != 1) return Outcome.Clarify(choices)
-            replacements[token] = choices.first()
+            if (token in ignoredWords) continue
+            val exactCategoryMatches = categoryWords.filterValues { token in it }.keys
+            if (exactCategoryMatches.isNotEmpty()) {
+                exactCategoryCandidates.addAll(exactCategoryMatches)
+                continue
+            }
+            val exactActionMatches = actionWords.filterValues { token in it }.keys
+            if (exactActionMatches.isNotEmpty()) {
+                exactActionMatches.forEach { actionScores[it] = (actionScores[it] ?: 0) + 1 }
+                continue
+            }
+            val modifier = nearestSignal(token, modifiers)
+            if (modifier != null) {
+                if (modifier in setOf("new", "unread")) unreadOnly = true
+                if (modifier == "today") todayOnly = true
+                continue
+            }
+            val categoryMatches = nearestCategories(token)
+            val actionMatches = nearestActions(token)
+            val categoryDistance = bestCategoryDistance(token)
+            val actionDistance = bestActionDistance(token)
+            if (actionMatches.isNotEmpty() &&
+                (categoryMatches.isEmpty() || actionDistance!! <= (categoryDistance ?: Int.MAX_VALUE))) {
+                actionMatches.forEach { actionScores[it] = (actionScores[it] ?: 0) + 1 }
+                continue
+            }
+            if (categoryMatches.isNotEmpty()) {
+                categoryMatches.forEach { categoryScores[it] = (categoryScores[it] ?: 0) + 1 }
+                continue
+            }
+            // Unknown words are permitted; only recognized intent tokens score.
         }
-        val tokens = rawTokens.map { replacements[it] ?: it }
-        val foundCategories = categoryWords.mapNotNull { (cat, words) -> if (tokens.any { it in words }) cat else null }.toSet()
+        val foundCategories = if (exactCategoryCandidates.isNotEmpty()) exactCategoryCandidates else categoryScores.keys
         if (foundCategories.size > 1) return Outcome.Clarify(foundCategories.map { it.name }.toSet())
-        val actionCandidates = actionWords.filterValues { words -> tokens.any { it in words } }.keys
-        val explicitActions = actionCandidates - Action.WHAT_IN
+        val actionCandidates = actionScores.keys
+        val explicitActions = actionCandidates - setOf(Action.WHAT_IN, Action.ANY)
         if (explicitActions.size > 1) return Outcome.Clarify(explicitActions.map { it.name }.toSet())
         val hasQuestion = "what" in tokens
         val hasIn = "in" in tokens
-        val action = explicitActions.singleOrNull() ?: if (hasQuestion && hasIn) Action.WHAT_IN else Action.SHOW
-        val wordsForAction = actionWords[action].orEmpty()
-        val extras = tokens.filterNot { it in filler || it in wordsForAction || categoryWords.values.any { set -> it in set } || it in setOf("new", "unread", "today") }
-        if (extras.isNotEmpty()) return Outcome.Rejected("Unexpected term: ${extras.first()}")
+        val action = explicitActions.singleOrNull()
+            ?: if (Action.ANY in actionCandidates) Action.ANY
+            else if (hasQuestion && hasIn) Action.WHAT_IN else Action.SHOW
         val category = foundCategories.singleOrNull()
-        val explicitStandalone = tokens.any { it in setOf("notification", "notifications") }
+        val explicitStandalone = Regex("\\bnotifications?\\b").containsMatchIn(normalized)
         if (category == null && !explicitStandalone) return Outcome.Rejected("A notification category is required")
-        return Outcome.Parsed(Query(action, category, tokens.any { it == "new" || it == "unread" }, tokens.contains("today"), fromApp))
+        return Outcome.Parsed(Query(action, category, unreadOnly, todayOnly, fromApp))
+    }
+
+    private fun nearestCategories(token: String): Set<Category> {
+        val exact = categoryWords.filterValues { token in it }.keys
+        if (exact.isNotEmpty()) return exact
+        if (token.length < 3) return emptySet()
+        val distances = categoryWords.flatMap { (category, words) -> words.map { category to distance(token, it, 2) } }
+            .filter { it.second <= 2 }
+        if (distances.isEmpty()) return emptySet()
+        val best = distances.minOf { it.second }
+        return distances.filter { it.second == best }.map { it.first }.toSet()
+    }
+
+    private fun bestCategoryDistance(token: String): Int? = categoryWords.values.asSequence().flatten()
+        .map { distance(token, it, 2) }.minOrNull()?.takeIf { it <= 2 }
+
+    private fun bestActionDistance(token: String): Int? = actionWords.values.asSequence().flatten()
+        .map { distance(token, it, 2) }.minOrNull()?.takeIf { it <= 2 }
+
+    private fun nearestActions(token: String): Set<Action> {
+        val exact = actionWords.filterValues { token in it }.keys
+        if (exact.isNotEmpty()) return exact
+        if (token.length < 3) return emptySet()
+        val distances = actionWords.flatMap { (action, words) -> words.map { action to distance(token, it, 2) } }
+            .filter { it.second <= 2 }
+        if (distances.isEmpty()) return emptySet()
+        val best = distances.minOf { it.second }
+        return distances.filter { it.second == best }.map { it.first }.toSet()
+    }
+
+    private fun nearestSignal(token: String, signals: Set<String>): String? {
+        if (token in signals) return token
+        if (token.length < 3) return null
+        return signals.map { it to distance(token, it, 2) }.filter { it.second <= 2 }
+            .minByOrNull { it.second }?.first
     }
 
     private fun boundedValue(value: String): String? {
@@ -143,5 +218,66 @@ object NotificationQueryRegressionCases {
         "show games notification", "read games notifications", "tell games", "list games notification",
         "show finance notification", "read finance notifications", "tell finance", "list finance notification",
         "open text notification", "any new calls notification", "show unread email today", "list music from youtube"
+    )
+
+    data class NaturalSentence(
+        val text: String,
+        val category: NotificationQueryParser.Category,
+        val action: NotificationQueryParser.Action = NotificationQueryParser.Action.SHOW,
+        val unreadOnly: Boolean = false,
+        val todayOnly: Boolean = false
+    )
+
+    val naturalSentences = listOf(
+        NaturalSentence("Could you show me my latest text messages please?", NotificationQueryParser.Category.MESSAGES_SMS),
+        NaturalSentence("Did I receive any new SMS today?", NotificationQueryParser.Category.MESSAGES_SMS, NotificationQueryParser.Action.ANY, true, true),
+        NaturalSentence("Tell me what's in the message notifications", NotificationQueryParser.Category.MESSAGES_SMS, NotificationQueryParser.Action.TELL),
+        NaturalSentence("Please list the text alerts from today", NotificationQueryParser.Category.MESSAGES_SMS, NotificationQueryParser.Action.LIST, todayOnly = true),
+        NaturalSentence("Check whether there are unread SMS messages", NotificationQueryParser.Category.MESSAGES_SMS, unreadOnly = true),
+        NaturalSentence("Can you show my WhatsApp chat alerts?", NotificationQueryParser.Category.CHAT),
+        NaturalSentence("Read the newest Telegram conversations for me", NotificationQueryParser.Category.CHAT, NotificationQueryParser.Action.READ),
+        NaturalSentence("I got new WhatsApp chats, could you find them?", NotificationQueryParser.Category.CHAT, unreadOnly = true),
+        NaturalSentence("List my unread chats today", NotificationQueryParser.Category.CHAT, NotificationQueryParser.Action.LIST, true, true),
+        NaturalSentence("Could you tell me about the latest Telegram notifications?", NotificationQueryParser.Category.CHAT, NotificationQueryParser.Action.TELL),
+        NaturalSentence("Show all missed calls from earlier today", NotificationQueryParser.Category.CALLS, todayOnly = true),
+        NaturalSentence("Tell me who rang with missed call alerts", NotificationQueryParser.Category.CALLS, NotificationQueryParser.Action.TELL),
+        NaturalSentence("List unread call notifications, please", NotificationQueryParser.Category.CALLS, NotificationQueryParser.Action.LIST, unreadOnly = true),
+        NaturalSentence("Can you find the most recent calls?", NotificationQueryParser.Category.CALLS),
+        NaturalSentence("Show system update notifications from today", NotificationQueryParser.Category.SYSTEM, todayOnly = true),
+        NaturalSentence("Tell me if Android has any unread device alerts", NotificationQueryParser.Category.SYSTEM, NotificationQueryParser.Action.TELL, unreadOnly = true),
+        NaturalSentence("List my latest phone alerts", NotificationQueryParser.Category.SYSTEM, NotificationQueryParser.Action.LIST),
+        NaturalSentence("Can you find recent Android notifications?", NotificationQueryParser.Category.SYSTEM),
+        NaturalSentence("Show me my latest music alerts", NotificationQueryParser.Category.MUSIC_AND_MEDIA),
+        NaturalSentence("Read the newest YouTube notifications", NotificationQueryParser.Category.MUSIC_AND_MEDIA, NotificationQueryParser.Action.READ),
+        NaturalSentence("List audio updates from today", NotificationQueryParser.Category.MUSIC_AND_MEDIA, NotificationQueryParser.Action.LIST, todayOnly = true),
+        NaturalSentence("Tell me which media apps sent alerts", NotificationQueryParser.Category.MUSIC_AND_MEDIA, NotificationQueryParser.Action.TELL),
+        NaturalSentence("Show my latest Instagram notifications", NotificationQueryParser.Category.SOCIAL),
+        NaturalSentence("Tell me if I have unread Facebook updates", NotificationQueryParser.Category.SOCIAL, NotificationQueryParser.Action.TELL, unreadOnly = true),
+        NaturalSentence("List new social alerts today", NotificationQueryParser.Category.SOCIAL, NotificationQueryParser.Action.LIST, true, true),
+        NaturalSentence("Could you show me the recent posts notifications?", NotificationQueryParser.Category.SOCIAL),
+        NaturalSentence("Show the newest email alerts", NotificationQueryParser.Category.EMAIL),
+        NaturalSentence("Read unread Gmail notifications today", NotificationQueryParser.Category.EMAIL, NotificationQueryParser.Action.READ, true, true),
+        NaturalSentence("Tell me about my latest inbox updates", NotificationQueryParser.Category.EMAIL, NotificationQueryParser.Action.TELL),
+        NaturalSentence("List mail notifications please", NotificationQueryParser.Category.EMAIL, NotificationQueryParser.Action.LIST),
+        NaturalSentence("Show my local weather alerts", NotificationQueryParser.Category.WEATHER),
+        NaturalSentence("Tell me the forecast notifications from today", NotificationQueryParser.Category.WEATHER, NotificationQueryParser.Action.TELL, todayOnly = true),
+        NaturalSentence("List unread weather updates", NotificationQueryParser.Category.WEATHER, NotificationQueryParser.Action.LIST, unreadOnly = true),
+        NaturalSentence("Could you find the latest weather notifications?", NotificationQueryParser.Category.WEATHER),
+        NaturalSentence("Show my order notifications", NotificationQueryParser.Category.SHOPPING),
+        NaturalSentence("Tell me about the latest shopping alerts", NotificationQueryParser.Category.SHOPPING, NotificationQueryParser.Action.TELL),
+        NaturalSentence("List new delivery notices today", NotificationQueryParser.Category.SHOPPING, NotificationQueryParser.Action.LIST, true, true),
+        NaturalSentence("Could you find notifications from the shop app?", NotificationQueryParser.Category.SHOPPING),
+        NaturalSentence("Show my latest food alerts", NotificationQueryParser.Category.FOOD),
+        NaturalSentence("Tell me about restaurant updates", NotificationQueryParser.Category.FOOD, NotificationQueryParser.Action.TELL),
+        NaturalSentence("List Swiggy notifications from today", NotificationQueryParser.Category.FOOD, NotificationQueryParser.Action.LIST, todayOnly = true),
+        NaturalSentence("Could you find new Zomato alerts please?", NotificationQueryParser.Category.FOOD, unreadOnly = true),
+        NaturalSentence("Show my latest game notifications", NotificationQueryParser.Category.GAMES),
+        NaturalSentence("Tell me about unread gaming alerts", NotificationQueryParser.Category.GAMES, NotificationQueryParser.Action.TELL, unreadOnly = true),
+        NaturalSentence("List new games notices today", NotificationQueryParser.Category.GAMES, NotificationQueryParser.Action.LIST, true, true),
+        NaturalSentence("Can you find notifications from my game app?", NotificationQueryParser.Category.GAMES),
+        NaturalSentence("Show my latest bank alerts", NotificationQueryParser.Category.FINANCE),
+        NaturalSentence("Tell me whether I have unread payment notifications", NotificationQueryParser.Category.FINANCE, NotificationQueryParser.Action.TELL, unreadOnly = true),
+        NaturalSentence("List new finance updates from today", NotificationQueryParser.Category.FINANCE, NotificationQueryParser.Action.LIST, true, true),
+        NaturalSentence("Could you find transaction alerts?", NotificationQueryParser.Category.FINANCE)
     )
 }

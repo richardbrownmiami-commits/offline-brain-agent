@@ -11,7 +11,8 @@ data class MessageEntity(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val role: String,
     val text: String,
-    val timestamp: Long = System.currentTimeMillis()
+    val timestamp: Long = System.currentTimeMillis(),
+    @ColumnInfo(defaultValue = "NULL") val replyJson: String? = null
 )
 
 @Entity(tableName = "alarms")

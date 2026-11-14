@@ -5,6 +5,7 @@ import android.content.Context
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import androidx.core.app.NotificationManagerCompat
@@ -17,6 +18,8 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 
 object NotificationAccessState {
+    private val repairCooldown = RepairCooldown()
+
     @Volatile var connected: Boolean = false
         internal set
 
@@ -36,7 +39,7 @@ object NotificationAccessState {
     fun lastDisconnectedAt(context: Context): Long = context.applicationContext
         .getSharedPreferences("notification_capture_state", Context.MODE_PRIVATE).getLong("listener_disconnected_at", 0L)
 
-    fun requestRebind(context: Context) {
+    private fun requestRebind(context: Context) {
         if (Build.VERSION.SDK_INT >= 24 && enabled(context)) {
             try {
                 NotificationListenerService.requestRebind(ComponentName(context, BrainNotificationListener::class.java))
@@ -48,6 +51,7 @@ object NotificationAccessState {
     /** MIUI may leave access enabled while the binder is disconnected; cycle only this component. */
     fun repair(context: Context): Boolean {
         if (Build.VERSION.SDK_INT < 24 || !enabled(context)) return false
+        if (!repairCooldown.tryAcquire(SystemClock.elapsedRealtime())) return false
         requestRebind(context)
         if (connected) return true
         val app = context.applicationContext

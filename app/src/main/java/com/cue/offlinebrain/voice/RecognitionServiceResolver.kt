@@ -23,10 +23,11 @@ object RecognitionServiceResolver {
             return SpeechRecognizer.createOnDeviceSpeechRecognizer(context)
         }
         val candidates = installedServices(context)
-        for (component in candidates) {
-            try { return SpeechRecognizer.createSpeechRecognizer(context, component) }
+        val preferred = candidates.firstOrNull()
+        if (preferred != null) {
+            try { return SpeechRecognizer.createSpeechRecognizer(context, preferred) }
             catch (error: RuntimeException) {
-                CrashLog.record("VOICE", "could not create recognition service ${component.flattenToShortString()}; trying next provider", error)
+                CrashLog.record("VOICE", "could not create preferred recognition service ${preferred.flattenToShortString()}; using Android default", error)
             }
         }
         // Generic service selection remains supported on API 30 and as a safe final fallback.

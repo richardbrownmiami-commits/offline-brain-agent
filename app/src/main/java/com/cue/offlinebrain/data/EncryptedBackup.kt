@@ -147,7 +147,10 @@ object EncryptedBackup {
     private suspend fun exportPayload(database: BrainDatabase, settings: SettingsStore?): JSONObject {
         val dao = database.dao()
         val json = JSONObject().put("version", FORMAT_VERSION)
-        json.put("messages", JSONArray().apply { dao.allMessagesForBackup().forEach { put(JSONObject().put("id", it.id).put("role", it.role).put("text", it.text).put("timestamp", it.timestamp)) } })
+        json.put("messages", JSONArray().apply { dao.allMessagesForBackup().forEach { message ->
+            put(JSONObject().put("id", message.id).put("role", message.role).put("text", message.text).put("timestamp", message.timestamp)
+                .also { row -> message.replyJson?.let { row.put("replyJson", it) } })
+        } })
         json.put("alarms", JSONArray().apply { dao.allAlarmsForBackup().forEach { put(JSONObject().put("id", it.id).put("label", it.label).put("triggerAt", it.triggerAt).put("cron", it.cron).put("enabled", it.enabled)) } })
         json.put("notes", JSONArray().apply { dao.allNotesForBackup().forEach { put(JSONObject().put("id", it.id).put("text", it.text).put("done", it.done).put("updatedAt", it.updatedAt)) } })
         json.put("notifications", JSONArray().apply { dao.allNotificationsForBackup().forEach { put(JSONObject().put("id", it.id).put("packageName", it.packageName).put("title", it.title).put("text", it.text).put("postedAt", it.postedAt).put("dedupeKey", it.dedupeKey).put("textHash", it.textHash).put("category", it.category).put("isOngoing", it.isOngoing).put("groupName", it.groupName).put("isRead", it.isRead)) } })
@@ -193,7 +196,10 @@ object EncryptedBackup {
     }
 
     private fun parseRows(root: JSONObject, includeJournalCache: Boolean = false): RestoreRows {
-        val messages = root.array("messages").map { MessageEntity(it.getLong("id"), it.getString("role"), it.getString("text"), it.getLong("timestamp")) }
+        val messages = root.array("messages").map { row ->
+            MessageEntity(row.getLong("id"), row.getString("role"), row.getString("text"), row.getLong("timestamp"),
+                if (row.has("replyJson") && !row.isNull("replyJson")) row.getString("replyJson") else null)
+        }
         val alarms = root.array("alarms").map { AlarmEntity(it.getLong("id"), it.getString("label"), it.getLong("triggerAt"), it.optString("cron").takeIf { value -> value.isNotBlank() }, it.optBoolean("enabled")) }
         val notes = root.array("notes").map { NoteEntity(it.getLong("id"), it.getString("text"), it.optBoolean("done"), it.getLong("updatedAt")) }
         val notifications = root.array("notifications").map { row ->

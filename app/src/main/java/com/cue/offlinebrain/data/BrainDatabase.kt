@@ -16,7 +16,7 @@ import java.security.SecureRandom
         MessageEntity::class, AlarmEntity::class, NoteEntity::class, NotificationEntity::class, FaqEntity::class,
         AutomationRuleEntity::class, MacroEntity::class, ClipboardEntryEntity::class, WorkerCacheEntity::class
     ],
-    version = 3,
+    version = 4,
     exportSchema = true
 )
 abstract class BrainDatabase : RoomDatabase() {
@@ -49,6 +49,24 @@ abstract class BrainDatabase : RoomDatabase() {
             }
         }
 
+        internal val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE `messages` ADD COLUMN `replyJson` TEXT DEFAULT NULL")
+                db.execSQL("""
+                    UPDATE `notifications` SET `category` = 'Calls'
+                    WHERE lower(`packageName`) IN (
+                        'com.android.server.telecom', 'com.android.phone',
+                        'com.android.incallui', 'com.android.dialer'
+                    ) AND `category` IN ('System', 'Other')
+                """.trimIndent())
+                db.execSQL("""
+                    UPDATE `notifications` SET `category` = 'System'
+                    WHERE (lower(`packageName`) LIKE 'com.xiaomi.%' OR lower(`packageName`) LIKE 'com.miui.%')
+                      AND `category` = 'Other'
+                """.trimIndent())
+            }
+        }
+
         @Volatile private var instance: BrainDatabase? = null
         fun get(context: Context): BrainDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also { instance = it }
@@ -65,6 +83,7 @@ abstract class BrainDatabase : RoomDatabase() {
                 .openHelperFactory(factory)
                 .addMigrations(MIGRATION_1_2)
                 .addMigrations(MIGRATION_2_3)
+                .addMigrations(MIGRATION_3_4)
                 .fallbackToDestructiveMigration(false)
                 .build()
         }

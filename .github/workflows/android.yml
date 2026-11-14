@@ -11,16 +11,27 @@ jobs:
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: '17'
+          java-version: '21'
       - uses: android-actions/setup-android@v3
-      - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          accept-android-sdk-licenses: true
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0'
+      - uses: gradle/actions/setup-gradle@v4
       - name: Accept Android licenses
-        run: yes | sdkmanager --licenses || true
+        shell: bash
+        run: |
+          set +e
+          yes | sdkmanager --licenses
+          sdk_status=${PIPESTATUS[1]}
+          set -e
+          exit "$sdk_status"
       - name: Test and assemble
-        run: gradle testDebugUnitTest assembleDebug assembleRelease --stacktrace
+        run: ./gradlew --no-daemon testDebugUnitTest assembleDebug assembleRelease assembleDebugAndroidTest --stacktrace
       - uses: actions/upload-artifact@v4
         with:
-          name: offline-brain-apks
-          path: app/build/outputs/apk/**/*.apk
+          name: offline-brain-apks-and-mapping
+          path: |
+            app/build/outputs/apk/**/*.apk
+            app/build/outputs/mapping/release/mapping.txt
+          if-no-files-found: error
+          retention-days: 14

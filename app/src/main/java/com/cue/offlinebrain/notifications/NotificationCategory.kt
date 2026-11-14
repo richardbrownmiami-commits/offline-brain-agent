@@ -2,6 +2,7 @@ package com.cue.offlinebrain.notifications
 
 import android.content.pm.ApplicationInfo
 import android.app.Notification
+import java.util.Locale
 
 /** Rule-based notification grouping; no text is sent off-device. */
 object NotificationCategory {
@@ -15,7 +16,8 @@ object NotificationCategory {
         "com.viber.voip" to "Chat", "com.discord" to "Chat", "com.google.android.apps.messaging" to "Messages/SMS",
         "com.android.mms" to "Messages/SMS", "com.samsung.android.messaging" to "Messages/SMS",
         "com.android.messaging" to "Messages/SMS", "com.google.android.dialer" to "Calls",
-        "com.android.dialer" to "Calls", "com.android.incallui" to "Calls", "com.spotify.music" to "Music and media",
+        "com.android.dialer" to "Calls", "com.android.incallui" to "Calls",
+        "com.android.server.telecom" to "Calls", "com.android.phone" to "Calls", "com.spotify.music" to "Music and media",
         "com.google.android.youtube" to "Music and media", "com.google.android.apps.youtube.music" to "Music and media",
         "com.soundcloud.android" to "Music and media", "com.amazon.mShop.android.shopping" to "Shopping",
         "com.flipkart.android" to "Shopping", "com.myntra.android" to "Shopping", "com.meesho.supply" to "Shopping",
@@ -29,7 +31,9 @@ object NotificationCategory {
     )
 
     fun infer(packageName: String, notificationCategory: String?, applicationCategory: Int, hasMediaSession: Boolean = false): String {
-        val pkg = packageName.lowercase()
+        val pkg = packageName.lowercase(Locale.ROOT)
+        if (pkg.startsWith("com.xiaomi.") || pkg.startsWith("com.miui.")) return "System"
+        if (pkg == "com.android.server.telecom" || pkg == "com.android.phone") return "Calls"
         packages[pkg]?.let { mapped ->
             // A phone call notification from a chat app should still be shown as a call.
             if (notificationCategory == Notification.CATEGORY_CALL) return "Calls"

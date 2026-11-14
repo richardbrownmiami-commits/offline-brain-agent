@@ -46,6 +46,8 @@ class AndroidSpeechInputController(context: Context) {
     private var retryUsed = false
     private var generation = 0
     private var active = false
+    private var ready = false
+    private var startupWatchdog: Runnable? = null
     private var manualStop = false
     private var lastPartial = ""
     private var currentLanguage = "en-IN"
@@ -58,37 +60,38 @@ class AndroidSpeechInputController(context: Context) {
         cleanupRecognizer(cancel = true)
         this.onPartial = onPartial; this.onFinal = onFinal; this.onStatus = onStatus
         this.engineMode = mode; this.onRetryFailed = onRetryFailed
-        retryUsed = false; manualStop = false; lastPartial = ""; currentLanguage = "en-IN"
+        retryUsed = false; ready = false; manualStop = false; lastPartial = ""; currentLanguage = "en-IN"
         generation++; active = true; state.start()
         try {
             if (!SpeechRecognizer.isRecognitionAvailable(appContext)) {
-                finishError(null, "No Android speech service is installed. Install or enable a speech recognition service in phone settings, or use Offline mode."); return
+                finishWithFallback(SpeechRecognizer.ERROR_CLIENT, "No Android speech service is installed. Install or enable a speech recognition service in phone settings, or use Offline mode."); return
             }
             if (!requestFocus()) {
-                finishError(null, "Audio focus is unavailable, so speech input cannot start. Stop other audio playback and try again."); return
+                finishWithFallback(SpeechRecognizer.ERROR_CLIENT, "Audio focus is unavailable, so speech input cannot start. Stop other audio playback and try again."); return
             }
             createAndListen(generation)
         } catch (t: Throwable) {
             if (t is ThreadDeath) throw t
             CrashLog.record("VOICE", "Android speech start failed", t)
-            finishError(null, "Android speech recognition could not start. Check microphone permission and enabled speech services, then try again.")
+            finishWithFallback(SpeechRecognizer.ERROR_CLIENT, "Android speech recognition could not start. Check microphone permission and enabled speech services, then try again.")
         }
     }
 
     fun stop() {
         assertMain(); if (!active) return
+        cancelStartupWatchdog()
         manualStop = true; state.stopRequested(); notifyStatus("Done, processing…")
         try { recognizer?.stopListening() ?: finishError(null, "Speech service stopped before finishing. Tap the microphone to retry, or type instead.") }
         catch (t: Throwable) { CrashLog.record("VOICE", "manual stopListening failed", t); finishError(null, "Speech could not finish. Check microphone permission and try again.") }
     }
 
     fun cancel() {
-        assertMain(); generation++; active = false; handler.removeCallbacksAndMessages(null)
+        assertMain(); generation++; active = false; cancelStartupWatchdog(); handler.removeCallbacksAndMessages(null)
         cleanupRecognizer(cancel = true); abandonFocus(); state.reset(); diag(null, "Cancelled.")
     }
 
     fun release() {
-        assertMain(); generation++; active = false; handler.removeCallbacksAndMessages(null)
+        assertMain(); generation++; active = false; cancelStartupWatchdog(); handler.removeCallbacksAndMessages(null)
         cleanupRecognizer(cancel = true); abandonFocus(); state.reset(); diag(null, "Released.")
     }
 
@@ -111,12 +114,20 @@ class AndroidSpeechInputController(context: Context) {
         }
         notifyStatus("Starting Android speech recognition; offline preference is not a guarantee…")
         diag(null, "Starting (locale=$currentLanguage).")
+        ready = false
         service.startListening(intent)
+        val watchdogToken = token
+        val watchdog = Runnable {
+            if (active && generation == watchdogToken && !ready) startTimedOut()
+        }
+        startupWatchdog?.let(handler::removeCallbacks)
+        startupWatchdog = watchdog
+        handler.postDelayed(watchdog, START_TIMEOUT_MS)
     }
 
     private val listener = object : RecognitionListener {
-        override fun onReadyForSpeech(params: Bundle?) { if (active) { state.start(); notifyStatus("Listening… Speak a short request."); diag(null, "Listening ($currentLanguage).") } }
-        override fun onBeginningOfSpeech() { diag(null, "Speech started.") }
+        override fun onReadyForSpeech(params: Bundle?) { if (active) { ready = true; cancelStartupWatchdog(); state.start(); notifyStatus("Listening… Speak a short request."); diag(null, "Listening ($currentLanguage).") } }
+        override fun onBeginningOfSpeech() { if (active) { ready = true; cancelStartupWatchdog(); diag(null, "Speech started.") } }
         override fun onRmsChanged(rmsdB: Float) = Unit
         override fun onBufferReceived(buffer: ByteArray?) = Unit
         override fun onEndOfSpeech() { state.processing(); notifyStatus("Done, processing…"); diag(null, "Speech ended; awaiting result.") }
@@ -132,7 +143,7 @@ class AndroidSpeechInputController(context: Context) {
             try { val text = results?.getStringArrayList(SpeechRecognizer.RESULTS_RECOGNITION)?.firstOrNull().orEmpty(); finishResult(text) }
             catch (t: Throwable) { CrashLog.record("VOICE", "final result callback failed", t); finishError(null, "Speech result could not be read. Try again or type instead.") }
         }
-        override fun onError(error: Int) { if (active) handleError(error) }
+        override fun onError(error: Int) { if (active) { cancelStartupWatchdog(); handleError(error) } }
     }
 
     private fun handleError(code: Int) {
@@ -143,17 +154,27 @@ class AndroidSpeechInputController(context: Context) {
             diag(code, "Retry scheduled after Android error $code.")
             cleanupRecognizer(cancel = true); abandonFocus()
             handler.postDelayed({ if (active && generation == token) {
-                try { if (!requestFocus()) { finishError(code, "Audio focus could not be reacquired for the retry. Stop other playback and try again."); return@postDelayed }; createAndListen(token) }
+                try { if (!requestFocus()) { finishWithFallback(code, "Audio focus could not be reacquired for the retry. Stop other playback and try again."); return@postDelayed }; createAndListen(token) }
                 catch (t: Throwable) { CrashLog.record("VOICE", "speech retry failed", t); retryFailed(code) }
             } }, SpeechRetryPolicy.RETRY_DELAY_MS)
         } else if (retryUsed && (code == 5 || code == 8)) retryFailed(code)
-        else finishError(code, explain(code))
+        else finishWithFallback(code, explain(code))
     }
 
     private fun retryFailed(code: Int) {
         val message = "Android speech service remained busy after one retry (error $code). Close other voice apps and try again, or type your request."
+        finishWithFallback(code, message)
+    }
+
+    private fun startTimedOut() {
+        val msg = "The speech service did not start listening in 5 seconds. Another voice app may be holding the microphone."
+        diag(SpeechRecognizer.ERROR_CLIENT, "Start watchdog fired; no onReadyForSpeech.")
+        finishWithFallback(SpeechRecognizer.ERROR_CLIENT, msg)
+    }
+
+    private fun finishWithFallback(code: Int?, message: String) {
         finishError(code, message)
-        if (SpeechRetryPolicy.shouldFallbackToVosk(engineMode, retryFailed = true)) try { onRetryFailed?.invoke(code, message) }
+        if (SpeechRetryPolicy.shouldFallbackToVosk(engineMode, retryFailed = true)) try { onRetryFailed?.invoke(code ?: SpeechRecognizer.ERROR_CLIENT, message) }
         catch (t: Throwable) { CrashLog.record("VOICE", "retry-failure callback failed", t) }
     }
 
@@ -172,14 +193,16 @@ class AndroidSpeechInputController(context: Context) {
     }
 
     private fun finishResult(text: String) {
+        cancelStartupWatchdog()
         val result = state.result(text.take(2000)); active = false; cleanupRecognizer(cancel = false); abandonFocus()
         if (result.finalText.isNotBlank()) { notifyStatus(result.message); diag(null, "Transcript ready (contents omitted)."); try { onFinal(result.finalText) } catch (t: Throwable) { CrashLog.record("VOICE", "final transcript callback failed", t); notifyStatus("Could not place speech text in the message. Try again or type it.") } }
         else finishError(null, result.message)
     }
     private fun finishError(code: Int?, message: String) {
-        active = false; handler.removeCallbacksAndMessages(null); cleanupRecognizer(cancel = true); abandonFocus()
+        active = false; cancelStartupWatchdog(); handler.removeCallbacksAndMessages(null); cleanupRecognizer(cancel = true); abandonFocus()
         state.error(message); SpeechDiagnostics.error(message); diag(code, "Error: $message"); notifyStatus(message)
     }
+    private fun cancelStartupWatchdog() { startupWatchdog?.let(handler::removeCallbacks); startupWatchdog = null }
     private fun requestFocus(): Boolean = try {
         if (Build.VERSION.SDK_INT >= 26) {
             val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT)
@@ -193,4 +216,6 @@ class AndroidSpeechInputController(context: Context) {
     private fun notifyStatus(value: String) { SpeechDiagnostics.status(value); try { onStatus(value.take(500)) } catch (t: Throwable) { CrashLog.record("VOICE", "speech status callback failed", t) } }
     private fun diag(code: Int?, status: String) = SpeechDiagnostics.record("ANDROID", code, status)
     private fun assertMain() { check(Looper.myLooper() == Looper.getMainLooper()) { "Speech controller must be called on main thread" } }
+
+    companion object { private const val START_TIMEOUT_MS = 5_000L }
 }

@@ -14,7 +14,6 @@ import androidx.work.WorkerParameters
 import com.cue.offlinebrain.OfflineBrainApplication
 import com.cue.offlinebrain.data.EncryptedBackup
 import com.cue.offlinebrain.data.KeystoreSecretStore
-import com.cue.offlinebrain.data.WorkerCacheEntity
 import com.cue.offlinebrain.data.WorkerCacheKeys
 import com.cue.offlinebrain.diagnostics.CrashLog
 import com.cue.offlinebrain.net.PublicSkills
@@ -141,8 +140,7 @@ class PrivacyRetentionWorker(context: Context, params: WorkerParameters) : Corou
             val app = applicationContext as? OfflineBrainApplication ?: return@withContext Result.failure()
             val prefs = app.settings.settings.first()
             val before = System.currentTimeMillis() - prefs.notificationRetentionDays * 24L * 60L * 60L * 1000L
-            app.database.dao().deleteNotificationsBefore(before)
-            app.database.dao().deleteClipboardBefore(before)
+            app.repository.pruneLocalHistory(before)
             FeatureWorkStatus.record(applicationContext, "local-privacy-retention-cleanup", "success")
             CrashLog.record("PRIVACY", "local history retention cleanup completed")
             Result.success()
@@ -163,7 +161,6 @@ class ContentRefreshWorker(context: Context, params: WorkerParameters) : Corouti
                 FeatureWorkStatus.record(applicationContext, FeatureWorkScheduler.REFRESH_NAME, "disabled")
                 return@withContext Result.success()
             }
-            val dao = app.database.dao()
             val tasks = mutableListOf<Pair<String, () -> String>>()
             tasks += WorkerCacheKeys.weather(prefs.defaultCity) to { PublicSkills().weather(prefs.defaultCity) }
             tasks += WorkerCacheKeys.headlines(prefs.newsFeed) to { PublicSkills().headlines(prefs.newsFeed) }
@@ -178,7 +175,7 @@ class ContentRefreshWorker(context: Context, params: WorkerParameters) : Corouti
             tasks.forEach { (key, fetch) ->
                 try {
                     val result = fetch().take(4000)
-                    dao.putWorkerCache(WorkerCacheEntity(key, result))
+                    app.repository.saveBackgroundCache(key, result)
                 } catch (error: Exception) {
                     failed = true
                     // Do not log URLs, response bodies, notification contents, or API headers.
@@ -186,8 +183,7 @@ class ContentRefreshWorker(context: Context, params: WorkerParameters) : Corouti
                 }
             }
             val before = System.currentTimeMillis() - prefs.notificationRetentionDays * 24L * 60L * 60L * 1000L
-            dao.deleteNotificationsBefore(before)
-            dao.deleteClipboardBefore(before)
+            app.repository.pruneLocalHistory(before)
             val outcome = if (failed) Result.retry() else Result.success()
             FeatureWorkStatus.record(applicationContext, FeatureWorkScheduler.REFRESH_NAME, if (failed) "retry" else "success")
             outcome

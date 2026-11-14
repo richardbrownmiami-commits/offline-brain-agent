@@ -17,6 +17,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.LifecycleRegistry
 import androidx.lifecycle.runtime.R
+import androidx.savedstate.SavedStateRegistry
+import androidx.savedstate.SavedStateRegistryController
+import androidx.savedstate.SavedStateRegistryOwner
 import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.*
@@ -52,9 +55,11 @@ object OverlayDiagnostics {
     }
 }
 
-class FloatingAssistantOverlayService : Service(), LifecycleOwner {
+class FloatingAssistantOverlayService : Service(), LifecycleOwner, SavedStateRegistryOwner {
     private val lifecycleRegistry = LifecycleRegistry(this)
     override val lifecycle: Lifecycle get() = lifecycleRegistry
+    private val savedStateController = SavedStateRegistryController.create(this)
+    override val savedStateRegistry: SavedStateRegistry get() = savedStateController.savedStateRegistry
     private var windowManager: WindowManager? = null
     private var overlayView: ComposeView? = null
     private var layoutParams: WindowManager.LayoutParams? = null
@@ -63,13 +68,15 @@ class FloatingAssistantOverlayService : Service(), LifecycleOwner {
     private var testJob: Job? = null
     private var testRun = false
     private val commandRunning = AtomicBoolean(false)
-    @Volatile private var expanded = false
-    @Volatile private var reply = "Hi. Type a request and tap Send."
-    @Volatile private var inputText = ""
+    private var expanded by mutableStateOf(false)
+    private var reply by mutableStateOf("Hi. Type a request and tap Send.")
+    private var inputText by mutableStateOf("")
 
     override fun onBind(intent: Intent?): IBinder? = null
     override fun onCreate() {
         super.onCreate()
+        savedStateController.performAttach()
+        savedStateController.performRestore(null)
         lifecycleRegistry.handleLifecycleEvent(Lifecycle.Event.ON_CREATE)
         OverlayDiagnostics.update(permissionGranted = canDrawOverlay(), serviceRunning = true, viewAttached = false, lastError = null)
     }
@@ -109,13 +116,14 @@ class FloatingAssistantOverlayService : Service(), LifecycleOwner {
     private fun attachOverlay() {
         val manager = getSystemService(Context.WINDOW_SERVICE) as? WindowManager ?: error("Android WindowManager is unavailable")
         val view = ComposeView(this).apply {
-            setTag(R.id.view_tree_lifecycle_owner, this@FloatingAssistantOverlayService)
+            OverlayComposeOwners.install(this, this@FloatingAssistantOverlayService, this@FloatingAssistantOverlayService)
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
             setContent {
                 FloatingPanel(
-                    expanded = expanded, reply = reply, initialText = inputText,
-                    onExpand = { expanded = true; overlayView?.requestFocus() },
-                    onCollapse = { expanded = false }, onSend = ::sendCommand,
+                    expanded = expanded, reply = reply, inputText = inputText,
+                    onExpand = { expanded = true; setInputPanelOpen(true); overlayView?.requestFocus() },
+                    onCollapse = { expanded = false; setInputPanelOpen(false) }, onSend = ::sendCommand,
+                    onInputChange = { inputText = it.take(MAX_COMMAND_LENGTH) },
                     onStop = { stopSelf() }, onOpen = ::openApp,
                     onDrag = ::moveBy, onLongPress = ::stopSelf
                 )
@@ -127,7 +135,9 @@ class FloatingAssistantOverlayService : Service(), LifecycleOwner {
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.LEFT
@@ -138,12 +148,12 @@ class FloatingAssistantOverlayService : Service(), LifecycleOwner {
             manager.addView(view, params)
         } catch (error: WindowManager.BadTokenException) {
             CrashLog.record("OVERLAY", "Android rejected overlay window token", error)
-            OverlayDiagnostics.update(viewAttached = false, lastError = error.message ?: "Bad overlay token")
+            OverlayDiagnostics.update(viewAttached = false, lastError = "${error.javaClass.simpleName}: ${error.message ?: "Bad overlay token"}")
             view.disposeComposition()
             throw error
         } catch (error: Exception) {
             CrashLog.record("OVERLAY", "overlay window attachment failed", error)
-            OverlayDiagnostics.update(viewAttached = false, lastError = error.message ?: error.javaClass.simpleName)
+            OverlayDiagnostics.update(viewAttached = false, lastError = "${error.javaClass.simpleName}: ${error.message ?: "no detail supplied"}")
             view.disposeComposition()
             throw error
         }
@@ -178,37 +188,31 @@ class FloatingAssistantOverlayService : Service(), LifecycleOwner {
     }
     private fun persistPosition(pos: OverlayPosition) { getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_X,pos.x).putInt(KEY_Y,pos.y).apply() }
 
-    private fun sendCommand(text: String) {
-        val clean = text.trim().take(MAX_COMMAND_LENGTH)
-        if (clean.isBlank()) { reply = "Type a request first."; refreshPanel(); return }
-        if (!commandRunning.compareAndSet(false, true)) { reply = "A request is already running; please wait."; refreshPanel(); return }
-        inputText = clean
-        reply = "Working…"
-        refreshPanel()
-        commandJob = serviceScope.launch {
-            try {
-                val app = application as OfflineBrainApplication
-                val repository = BrainRepository(applicationContext, app.database, app.settings)
-                reply = withContext(Dispatchers.IO) { repository.handle(clean) }.take(MAX_REPLY_LENGTH)
-            } catch (cancelled: CancellationException) { throw cancelled }
-            catch (error: Exception) { CrashLog.record("OVERLAY", "assistant request failed", error); reply = "I couldn't complete that request: ${error.message ?: "check the app"}" }
-            finally { commandRunning.set(false); refreshPanel() }
+    private fun setInputPanelOpen(open: Boolean) {
+        val view = overlayView ?: return
+        val params = layoutParams ?: return
+        val focusFlag = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
+        val nextFlags = if (open) params.flags and focusFlag.inv() else params.flags or focusFlag
+        if (nextFlags != params.flags) {
+            params.flags = nextFlags
+            updateWindow(view, params)
         }
     }
 
-    private fun refreshPanel() {
-        val old = overlayView ?: return
-        val manager = windowManager ?: return
-        val p = layoutParams ?: return
-        try {
-            manager.removeView(old)
-            old.disposeComposition()
-            val previousExpanded = expanded
-            overlayView = null; layoutParams = null
-            expanded = previousExpanded
-            attachOverlay()
-        } catch (cancelled: CancellationException) { throw cancelled }
-        catch (error: Exception) { CrashLog.record("OVERLAY", "assistant panel refresh failed", error); OverlayDiagnostics.update(lastError = error.message ?: "Panel refresh failed") }
+    private fun sendCommand(text: String) {
+        val clean = text.trim().take(MAX_COMMAND_LENGTH)
+        if (clean.isBlank()) { reply = "Type a request first."; return }
+        if (!commandRunning.compareAndSet(false, true)) { reply = "A request is already running; please wait."; return }
+        inputText = clean
+        reply = "Working…"
+        commandJob = serviceScope.launch {
+            try {
+                val app = application as OfflineBrainApplication
+                reply = withContext(Dispatchers.IO) { app.repository.handle(clean).plainText }.take(MAX_REPLY_LENGTH)
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { CrashLog.record("OVERLAY", "assistant request failed", error); reply = "I couldn't complete that request: ${error.message ?: "check the app"}" }
+            finally { commandRunning.set(false) }
+        }
     }
 
     private fun openApp() {
@@ -263,8 +267,7 @@ class FloatingAssistantOverlayService : Service(), LifecycleOwner {
 }
 
 @Composable
-private fun FloatingPanel(expanded: Boolean, reply: String, initialText: String, onExpand: () -> Unit, onCollapse: () -> Unit, onSend: (String) -> Unit, onStop: () -> Unit, onOpen: () -> Unit, onDrag: (Int,Int) -> Unit, onLongPress: () -> Unit) {
-    var text by remember { mutableStateOf(initialText) }
+private fun FloatingPanel(expanded: Boolean, reply: String, inputText: String, onExpand: () -> Unit, onCollapse: () -> Unit, onSend: (String) -> Unit, onInputChange: (String) -> Unit, onStop: () -> Unit, onOpen: () -> Unit, onDrag: (Int,Int) -> Unit, onLongPress: () -> Unit) {
     MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF8FE3D8), surface = Color(0xFF1A1B25))) {
         Surface(color = Color(0xFF1A1B25), shape = RoundedCornerShape(16.dp), shadowElevation = 10.dp) {
             Column(Modifier.widthIn(min=74.dp,max=280.dp).padding(8.dp), verticalArrangement=Arrangement.spacedBy(6.dp)) {
@@ -278,9 +281,9 @@ private fun FloatingPanel(expanded: Boolean, reply: String, initialText: String,
                 }
                 if (expanded) {
                     Text(reply, color=Color.White, modifier=Modifier.heightIn(max=120.dp).verticalScroll(rememberScrollState()))
-                    BasicTextField(value=text, onValueChange={ text=it.take(2_000) }, modifier=Modifier.fillMaxWidth().padding(8.dp).semantics { contentDescription="Assistant request" }, textStyle=androidx.compose.ui.text.TextStyle(color=Color.White), decorationBox={ inner -> if(text.isEmpty()) Text("Type a request…",color=Color.LightGray); inner() })
+                    BasicTextField(value=inputText, onValueChange=onInputChange, modifier=Modifier.fillMaxWidth().padding(8.dp).semantics { contentDescription="Assistant request" }, textStyle=androidx.compose.ui.text.TextStyle(color=Color.White), decorationBox={ inner -> if(inputText.isEmpty()) Text("Type a request…",color=Color.LightGray); inner() })
                     Row(horizontalArrangement=Arrangement.spacedBy(6.dp)) {
-                        Button(onClick={onSend(text)}) { Text("Send") }
+                        Button(onClick={onSend(inputText)}) { Text("Send") }
                         OutlinedButton(onClick=onOpen) { Text("Open full Chat") }
                     }
                     OutlinedButton(onClick=onStop, modifier=Modifier.fillMaxWidth()) { Text("Stop floating assistant") }
