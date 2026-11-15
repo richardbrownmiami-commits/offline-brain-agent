@@ -36,7 +36,9 @@ object CompoundCommandParser {
     fun parse(text: String, installedApps: List<InstalledCommandApp>): CommandParseResult {
         val cleaned = text.trim().removePrefix("please ").trim()
         if (cleaned.isBlank()) return CommandParseResult(false)
-        val implicitSearch = Regex("(?i)^(open|launch|start)\\s+(.+?)\\s+(search|find|look\\s+for)\\s+(.+)$").matchEntire(cleaned)
+        val implicitSearch = Regex("(?i)^(open|launch|start)\\s+(.+?)\\s+(search|find|look\\s+for)\\s+(.+)$")
+            .matchEntire(cleaned)
+            ?.takeIf { !it.groupValues[2].trim().endsWith(" and", true) && !it.groupValues[2].trim().endsWith(" then", true) }
         val normalized = if (implicitSearch != null) {
             "${implicitSearch.groupValues[1]} ${implicitSearch.groupValues[2]} and ${implicitSearch.groupValues[3]} ${implicitSearch.groupValues[4]}"
         } else cleaned
@@ -61,8 +63,12 @@ object CompoundCommandParser {
                         lower.startsWith("look for ") -> segment.drop(9).trim()
                         else -> segment.dropWhile { !it.isWhitespace() }.trim()
                     }
-                    val imageSearch = Regex("(?i)\\s+images?$\\s*").containsMatchIn(rawQuery)
-                    val query = if (imageSearch) rawQuery.replace(Regex("(?i)\\s+images?$\\s*"), "").trim() else rawQuery
+                    val imageSearch = rawQuery.equals("image", true) || rawQuery.equals("images", true) || Regex("(?i)\\s+images?$\\s*").containsMatchIn(rawQuery)
+                    val query = when {
+                        rawQuery.equals("image", true) || rawQuery.equals("images", true) -> ""
+                        imageSearch -> rawQuery.replace(Regex("(?i)\\s+images?$\\s*"), "").trim()
+                        else -> rawQuery
+                    }
                     if (query.isBlank()) return CommandParseResult(true, error = "Say what you want me to search for.")
                     val prior = previousApp
                     val browser = prior?.let(::isBrowser) == true

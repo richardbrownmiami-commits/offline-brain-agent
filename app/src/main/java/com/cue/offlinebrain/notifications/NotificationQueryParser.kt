@@ -35,7 +35,7 @@ object NotificationQueryParser {
         Category.MESSAGES_SMS to setOf("text", "texts", "sms", "message", "messages", "messaging", "texts", "texting", "smses"),
         Category.CHAT to setOf("chat", "chats", "whatsapp", "telegram", "conversation", "conversations", "signal", "messenger", "discord", "slack"),
         Category.CALLS to setOf("call", "calls", "missed", "ring", "phonecall", "phonecalls", "dial", "voicemail", "voicemails"),
-        Category.SYSTEM to setOf("system", "android", "phone", "device", "battery", "update", "updates", "alert", "alerts"),
+        Category.SYSTEM to setOf("system", "android", "phone", "device", "battery"),
         Category.MUSIC_AND_MEDIA to setOf("music", "media", "youtube", "video", "videos", "song", "songs", "audio", "stream", "spotify", "podcast", "podcasts"),
         Category.SOCIAL to setOf("social", "instagram", "facebook", "twitter", "reddit", "posts", "tweet", "tweets", "tiktok", "snapchat", "linkedin"),
         Category.EMAIL to setOf("email", "emails", "mail", "inbox", "gmail", "outlook"),
@@ -59,7 +59,7 @@ object NotificationQueryParser {
         "me", "my", "the", "a", "an", "please", "did", "do", "does", "send", "sent", "say", "said",
         "get", "got", "received", "receive", "have", "has", "had", "about", "is", "are", "was", "were",
         "all", "for", "of", "on", "at", "to", "and", "or", "i", "you", "your", "with", "from", "whether",
-        "notification", "notifications", "what's", "whats", "what", "who", "how", "when", "where", "which", "why", "there", "in", "recent", "latest", "newest",
+        "notification", "notifications", "alert", "alerts", "update", "updates", "what's", "whats", "what", "who", "how", "when", "where", "which", "why", "there", "in", "recent", "latest", "newest",
         "last", "most", "could", "would", "can", "showing", "getting", "gotten"
     )
 
@@ -88,6 +88,7 @@ object NotificationQueryParser {
             val timeframe = parseTimeframe(tail)
             val withoutTime = timeframe.first.replace(Regex("\\b(saved|notification|notifications|from)\\b", RegexOption.IGNORE_CASE), " ").trim()
             val category = detectCategory(withoutTime)
+                ?: if (Regex("\\b(alert|alerts|update|updates)\\b", RegexOption.IGNORE_CASE).containsMatchIn(withoutTime)) Category.SYSTEM else null
             val standalone = withoutTime.isBlank()
             if (category == null && !standalone) return Outcome.Rejected("A notification category is required")
             return Outcome.Parsed(Query(intent, category = category, todayOnly = timeframe.second.today,
@@ -112,6 +113,9 @@ object NotificationQueryParser {
             .replace(Regex("[^\\p{L}\\p{N}']+"), " ").trim()
         if (normalized.isEmpty()) return Outcome.Rejected("Empty query")
         val tokens = normalized.split(Regex("\\s+")).filter(String::isNotBlank)
+        val genericSystemSignal = tokens.any { it in setOf("alert", "alerts", "update", "updates") }
+        val chatPlatformMentioned = tokens.any { it in setOf("whatsapp", "telegram", "signal", "messenger", "discord", "slack") }
+        val explicitSmsMentioned = tokens.any { it in setOf("text", "texts", "sms", "texting", "smses") }
         val categoryScores = mutableMapOf<Category, Int>()
         val exactCategoryCandidates = linkedSetOf<Category>()
         val actionScores = mutableMapOf<Action, Int>()
@@ -139,7 +143,17 @@ object NotificationQueryParser {
             }
             if (categoryMatches.isNotEmpty()) { categoryMatches.forEach { categoryScores[it] = (categoryScores[it] ?: 0) + 1 }; continue }
         }
-        val foundCategories = if (exactCategoryCandidates.isNotEmpty()) exactCategoryCandidates else categoryScores.keys
+        val rawCategories = when {
+            exactCategoryCandidates.isNotEmpty() -> exactCategoryCandidates
+            categoryScores.isNotEmpty() -> categoryScores.keys
+            genericSystemSignal -> setOf(Category.SYSTEM)
+            else -> emptySet()
+        }
+        val foundCategories = when {
+            chatPlatformMentioned && !explicitSmsMentioned -> rawCategories - Category.MESSAGES_SMS
+            explicitSmsMentioned && !chatPlatformMentioned -> rawCategories - Category.CHAT
+            else -> rawCategories
+        }
         if (foundCategories.size > 1) return Outcome.Clarify(foundCategories.map { it.name }.toSet())
         val actionCandidates = actionScores.keys
         val explicitActions = actionCandidates - setOf(Action.WHAT_IN, Action.ANY)
@@ -172,7 +186,14 @@ object NotificationQueryParser {
     private fun detectCategory(text: String): Category? {
         val tokens = text.lowercase().replace(Regex("[^\\p{L}\\p{N}]+"), " ").split(Regex("\\s+")).filter { it.isNotBlank() }
         val found = tokens.flatMap { token -> categoryWords.filterValues { token in it }.keys }.toSet()
-        return found.singleOrNull()
+        val chatPlatformMentioned = tokens.any { it in setOf("whatsapp", "telegram", "signal", "messenger", "discord", "slack") }
+        val explicitSmsMentioned = tokens.any { it in setOf("text", "texts", "sms", "texting", "smses") }
+        val resolved = when {
+            chatPlatformMentioned && !explicitSmsMentioned -> found - Category.MESSAGES_SMS
+            explicitSmsMentioned && !chatPlatformMentioned -> found - Category.CHAT
+            else -> found
+        }
+        return resolved.singleOrNull()
     }
     private fun nearestCategories(token: String): Set<Category> {
         val exact = categoryWords.filterValues { token in it }.keys
@@ -238,6 +259,6 @@ object NotificationQueryRegressionCases {
         NaturalSentence("Tell me the forecast notifications from today", NotificationQueryParser.Category.WEATHER, NotificationQueryParser.Action.TELL, todayOnly = true), NaturalSentence("List unread weather updates", NotificationQueryParser.Category.WEATHER, NotificationQueryParser.Action.LIST, unreadOnly = true), NaturalSentence("Could you find the latest weather notifications?", NotificationQueryParser.Category.WEATHER), NaturalSentence("Show my order notifications", NotificationQueryParser.Category.SHOPPING), NaturalSentence("Tell me about the latest shopping alerts", NotificationQueryParser.Category.SHOPPING, NotificationQueryParser.Action.TELL),
         NaturalSentence("List new delivery notices today", NotificationQueryParser.Category.SHOPPING, NotificationQueryParser.Action.LIST, true, true), NaturalSentence("Could you find notifications from the shop app?", NotificationQueryParser.Category.SHOPPING), NaturalSentence("Show my latest food alerts", NotificationQueryParser.Category.FOOD), NaturalSentence("Tell me about restaurant updates", NotificationQueryParser.Category.FOOD, NotificationQueryParser.Action.TELL), NaturalSentence("List Swiggy notifications from today", NotificationQueryParser.Category.FOOD, NotificationQueryParser.Action.LIST, todayOnly = true),
         NaturalSentence("Could you find new Zomato alerts please?", NotificationQueryParser.Category.FOOD, unreadOnly = true), NaturalSentence("Show my latest game notifications", NotificationQueryParser.Category.GAMES), NaturalSentence("Tell me about unread gaming alerts", NotificationQueryParser.Category.GAMES, NotificationQueryParser.Action.TELL, unreadOnly = true), NaturalSentence("List new games notices today", NotificationQueryParser.Category.GAMES, NotificationQueryParser.Action.LIST, true, true), NaturalSentence("Can you find notifications from my game app?", NotificationQueryParser.Category.GAMES),
-        NaturalSentence("Show my latest bank alerts", NotificationQueryParser.Category.FINANCE), NaturalSentence("Tell me whether I have unread payment notifications", NotificationQueryParser.Category.FINANCE, unreadOnly = true), NaturalSentence("List new finance updates from today", NotificationQueryParser.Category.FINANCE, NotificationQueryParser.Action.LIST, true, true), NaturalSentence("Could you find transaction alerts?", NotificationQueryParser.Category.FINANCE)
+        NaturalSentence("Show my latest bank alerts", NotificationQueryParser.Category.FINANCE), NaturalSentence("Tell me whether I have unread payment notifications", NotificationQueryParser.Category.FINANCE, NotificationQueryParser.Action.TELL, unreadOnly = true), NaturalSentence("List new finance updates from today", NotificationQueryParser.Category.FINANCE, NotificationQueryParser.Action.LIST, true, true), NaturalSentence("Could you find transaction alerts?", NotificationQueryParser.Category.FINANCE)
     )
 }

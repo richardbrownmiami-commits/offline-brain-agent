@@ -36,7 +36,7 @@ class NotificationQueryParserTest {
             val query = (result as NotificationQueryParser.Outcome.Parsed).query
             assertEquals("Category for ${example.text}", example.category, query.category)
             assertEquals("Action for ${example.text}", example.action, query.action)
-            val expectsUnread = example.unreadOnly || Regex("\\blatest\\b", RegexOption.IGNORE_CASE).containsMatchIn(example.text)
+            val expectsUnread = example.unreadOnly || Regex("\\b(latest|newest)\\b", RegexOption.IGNORE_CASE).containsMatchIn(example.text)
             assertEquals("Unread modifier for ${example.text}", expectsUnread, query.unreadOnly)
             assertEquals("Today modifier for ${example.text}", example.todayOnly, query.todayOnly)
         }
