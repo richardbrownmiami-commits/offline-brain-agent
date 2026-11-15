@@ -16,7 +16,8 @@ data class CommandAction(
     val description: String,
     val value: String = "",
     val packageName: String = "",
-    val appLabel: String = ""
+    val appLabel: String = "",
+    val imageSearch: Boolean = false
 )
 
 data class CommandPlan(val actions: List<CommandAction>) {
@@ -35,7 +36,13 @@ object CompoundCommandParser {
     fun parse(text: String, installedApps: List<InstalledCommandApp>): CommandParseResult {
         val cleaned = text.trim().removePrefix("please ").trim()
         if (cleaned.isBlank()) return CommandParseResult(false)
-        val segments = splitBeforeVerb.split(cleaned).map { it.trim().trimEnd('.', '?', '!') }.filter { it.isNotBlank() }
+        val implicitSearch = Regex("(?i)^(open|launch|start)\\s+(.+?)\\s+(search|find|look\\s+for)\\s+(.+)$")
+            .matchEntire(cleaned)
+            ?.takeIf { !it.groupValues[2].trim().endsWith(" and", true) && !it.groupValues[2].trim().endsWith(" then", true) }
+        val normalized = if (implicitSearch != null) {
+            "${implicitSearch.groupValues[1]} ${implicitSearch.groupValues[2]} and ${implicitSearch.groupValues[3]} ${implicitSearch.groupValues[4]}"
+        } else cleaned
+        val segments = splitBeforeVerb.split(normalized).map { it.trim().trimEnd('.', '?', '!') }.filter { it.isNotBlank() }
         if (segments.isEmpty() || segments.none { verbPattern.containsMatchIn(it) }) return CommandParseResult(false)
 
         val actions = mutableListOf<CommandAction>()
@@ -52,16 +59,22 @@ object CompoundCommandParser {
                     CommandAction(CommandActionKind.OPEN_APP, "Open ${app.label}", packageName = app.packageName, appLabel = app.label)
                 }
                 lower.startsWith("search ") || lower.startsWith("find ") || lower.startsWith("look for ") -> {
-                    val query = when {
+                    val rawQuery = when {
                         lower.startsWith("look for ") -> segment.drop(9).trim()
                         else -> segment.dropWhile { !it.isWhitespace() }.trim()
+                    }
+                    val imageSearch = rawQuery.equals("image", true) || rawQuery.equals("images", true) || Regex("(?i)\\s+images?$\\s*").containsMatchIn(rawQuery)
+                    val query = when {
+                        rawQuery.equals("image", true) || rawQuery.equals("images", true) -> ""
+                        imageSearch -> rawQuery.replace(Regex("(?i)\\s+images?$\\s*"), "").trim()
+                        else -> rawQuery
                     }
                     if (query.isBlank()) return CommandParseResult(true, error = "Say what you want me to search for.")
                     val prior = previousApp
                     val browser = prior?.let(::isBrowser) == true
                     when {
                         prior != null && !browser -> CommandAction(CommandActionKind.IN_APP_SEARCH, "Search for ${query.take(70)} in ${prior.label}", query, prior.packageName, prior.label)
-                        else -> CommandAction(CommandActionKind.WEB_SEARCH, "Search Google for ${query.take(70)}${if (prior != null) " in ${prior.label}" else ""}", query, prior?.packageName.orEmpty(), prior?.label.orEmpty())
+                        else -> CommandAction(CommandActionKind.WEB_SEARCH, "Search Google for ${query.take(70)}${if (prior != null) " in ${prior.label}" else ""}", query, prior?.packageName.orEmpty(), prior?.label.orEmpty(), imageSearch)
                     }
                 }
                 lower.startsWith("type ") || lower.startsWith("write ") -> {

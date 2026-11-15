@@ -16,7 +16,7 @@ import java.security.SecureRandom
         MessageEntity::class, AlarmEntity::class, NoteEntity::class, NotificationEntity::class, FaqEntity::class,
         AutomationRuleEntity::class, MacroEntity::class, ClipboardEntryEntity::class, WorkerCacheEntity::class
     ],
-    version = 4,
+    version = 5,
     exportSchema = true
 )
 abstract class BrainDatabase : RoomDatabase() {
@@ -67,6 +67,40 @@ abstract class BrainDatabase : RoomDatabase() {
             }
         }
 
+        internal val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("""
+                    CREATE TABLE `notifications_v5` (
+                        `id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+                        `packageName` TEXT NOT NULL,
+                        `title` TEXT NOT NULL,
+                        `text` TEXT NOT NULL,
+                        `postedAt` INTEGER NOT NULL,
+                        `dedupeKey` TEXT NOT NULL DEFAULT '',
+                        `textHash` TEXT NOT NULL DEFAULT '',
+                        `category` TEXT NOT NULL DEFAULT 'Other',
+                        `isOngoing` INTEGER NOT NULL DEFAULT 0,
+                        `groupName` TEXT NOT NULL DEFAULT '',
+                        `isUnread` INTEGER NOT NULL DEFAULT 1,
+                        `readAt` INTEGER DEFAULT NULL,
+                        `deletedAt` INTEGER DEFAULT NULL
+                    )
+                """.trimIndent())
+                db.execSQL("""
+                    INSERT INTO `notifications_v5`
+                        (`id`, `packageName`, `title`, `text`, `postedAt`, `dedupeKey`, `textHash`, `category`, `isOngoing`, `groupName`, `isUnread`, `readAt`, `deletedAt`)
+                    SELECT `id`, `packageName`, `title`, `text`, `postedAt`, `dedupeKey`, `textHash`, `category`, `isOngoing`, `groupName`, 0, `postedAt`, NULL
+                    FROM `notifications`
+                """.trimIndent())
+                db.execSQL("DROP TABLE `notifications`")
+                db.execSQL("ALTER TABLE `notifications_v5` RENAME TO `notifications`")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_notifications_postedAt` ON `notifications` (`postedAt`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_notifications_packageName` ON `notifications` (`packageName`)")
+                db.execSQL("CREATE INDEX IF NOT EXISTS `index_notifications_category` ON `notifications` (`category`)")
+                db.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS `index_notifications_dedupeKey_textHash` ON `notifications` (`dedupeKey`, `textHash`)")
+            }
+        }
+
         @Volatile private var instance: BrainDatabase? = null
         fun get(context: Context): BrainDatabase = instance ?: synchronized(this) {
             instance ?: build(context.applicationContext).also { instance = it }
@@ -84,6 +118,7 @@ abstract class BrainDatabase : RoomDatabase() {
                 .addMigrations(MIGRATION_1_2)
                 .addMigrations(MIGRATION_2_3)
                 .addMigrations(MIGRATION_3_4)
+                .addMigrations(MIGRATION_4_5)
                 .fallbackToDestructiveMigration(false)
                 .build()
         }

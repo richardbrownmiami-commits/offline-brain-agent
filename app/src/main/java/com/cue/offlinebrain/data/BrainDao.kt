@@ -54,50 +54,71 @@ interface BrainDao {
 
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun saveNotification(notification: NotificationEntity): Long
-    @Query("SELECT * FROM notifications WHERE title LIKE '%' || :query || '%' OR text LIKE '%' || :query || '%' OR packageName LIKE '%' || :query || '%' ORDER BY postedAt DESC LIMIT 20")
+    @Query("SELECT * FROM notifications WHERE id = :id AND deletedAt IS NULL LIMIT 1")
+    suspend fun notificationById(id: Long): NotificationEntity?
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (title LIKE '%' || :query || '%' OR text LIKE '%' || :query || '%' OR packageName LIKE '%' || :query || '%') ORDER BY postedAt DESC LIMIT 20")
     suspend fun searchNotifications(query: String): List<NotificationEntity>
-    @Query("SELECT * FROM notifications WHERE postedAt >= :since AND (title LIKE '%otp%' OR text LIKE '%otp%' OR text GLOB '*[0-9][0-9][0-9][0-9]*') ORDER BY postedAt DESC LIMIT 20")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND postedAt >= :since AND (title LIKE '%otp%' OR text LIKE '%otp%' OR text GLOB '*[0-9][0-9][0-9][0-9]*') ORDER BY postedAt DESC LIMIT 20")
     suspend fun searchRecentOtpNotifications(since: Long): List<NotificationEntity>
-    @Query("SELECT * FROM notifications ORDER BY postedAt DESC LIMIT 20")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL ORDER BY postedAt DESC LIMIT 20")
     suspend fun recentNotifications(): List<NotificationEntity>
-    @Query("SELECT * FROM notifications ORDER BY postedAt DESC LIMIT 500")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL ORDER BY postedAt DESC LIMIT 500")
     fun observeNotificationHistory(): Flow<List<NotificationEntity>>
-    @Query("SELECT * FROM notifications WHERE category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery') ORDER BY postedAt DESC LIMIT 200")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery')) ORDER BY postedAt DESC LIMIT 200")
     suspend fun notificationsByCategory(category: String): List<NotificationEntity>
-    @Query("SELECT CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END AS category, COUNT(*) AS count FROM notifications GROUP BY CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END ORDER BY category")
+    @Query("SELECT CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END AS category, COUNT(*) AS count FROM notifications WHERE deletedAt IS NULL GROUP BY CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END ORDER BY category")
     suspend fun notificationCategoryCounts(): List<NotificationCategoryCount>
-    @Query("SELECT CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END AS category, COUNT(*) AS count FROM notifications GROUP BY CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END ORDER BY category")
+    @Query("SELECT CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END AS category, COUNT(*) AS count FROM notifications WHERE deletedAt IS NULL GROUP BY CASE WHEN category = 'Messages (SMS)' THEN 'Messages/SMS' WHEN category = 'Food and delivery' THEN 'Food' ELSE category END ORDER BY category")
     fun observeNotificationCategoryCounts(): Flow<List<NotificationCategoryCount>>
-    @Query("SELECT packageName, COUNT(*) AS count FROM notifications GROUP BY packageName ORDER BY packageName")
+    @Query("SELECT packageName, COUNT(*) AS count FROM notifications WHERE deletedAt IS NULL GROUP BY packageName ORDER BY packageName")
     suspend fun notificationPackageCounts(): List<NotificationPackageCount>
-    @Query("SELECT COUNT(*) FROM notifications") suspend fun notificationRowCount(): Int
-    @Query("SELECT MAX(postedAt) FROM notifications") suspend fun latestNotificationTime(): Long?
-    @Query("UPDATE notifications SET isRead = 1") suspend fun markAllNotificationsRead()
+    @Query("SELECT COUNT(*) FROM notifications WHERE deletedAt IS NULL") suspend fun notificationRowCount(): Int
+    @Query("SELECT MAX(postedAt) FROM notifications WHERE deletedAt IS NULL") suspend fun latestNotificationTime(): Long?
+    @Query("SELECT COUNT(*) FROM notifications WHERE deletedAt IS NULL AND isUnread = 0 AND (:category = '' OR category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery'))")
+    suspend fun readNotificationCount(category: String = ""): Int
+    @Query("UPDATE notifications SET isUnread = 0, readAt = :now WHERE deletedAt IS NULL") suspend fun markAllNotificationsRead(now: Long = System.currentTimeMillis())
+    @Query("UPDATE notifications SET isUnread = 1, readAt = NULL WHERE deletedAt IS NULL") suspend fun markAllNotificationsUnread()
     @Query("DELETE FROM notifications WHERE category = :category") suspend fun clearNotificationCategory(category: String)
-    @Query("SELECT * FROM notifications WHERE packageName = :packageName OR packageName LIKE '%' || :packageName || '%' ORDER BY postedAt DESC LIMIT 20")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (packageName = :packageName OR packageName LIKE '%' || :packageName || '%') ORDER BY postedAt DESC LIMIT 20")
     suspend fun notificationsFromPackage(packageName: String): List<NotificationEntity>
-    @Query("SELECT * FROM notifications WHERE packageName = :packageName AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isRead = 0) ORDER BY postedAt DESC LIMIT 200")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND packageName = :packageName AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isUnread = 1) ORDER BY postedAt DESC LIMIT 200")
     suspend fun notificationsFromPackageFiltered(packageName: String, since: Long, unreadOnly: Boolean): List<NotificationEntity>
-    @Query("SELECT * FROM notifications WHERE (category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery')) AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isRead = 0) ORDER BY postedAt DESC LIMIT 200")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery')) AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isUnread = 1) ORDER BY postedAt DESC LIMIT 200")
     suspend fun notificationsByCategoryFiltered(category: String, since: Long, unreadOnly: Boolean): List<NotificationEntity>
-    @Query("SELECT * FROM notifications WHERE (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isRead = 0) ORDER BY postedAt DESC LIMIT 200")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isUnread = 1) ORDER BY postedAt DESC LIMIT 200")
     suspend fun recentNotificationsFiltered(since: Long, unreadOnly: Boolean): List<NotificationEntity>
-    @Query("SELECT * FROM notifications WHERE (title LIKE '%' || :query || '%' OR text LIKE '%' || :query || '%') AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isRead = 0) ORDER BY postedAt DESC LIMIT 200")
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (title LIKE '%' || :query || '%' OR text LIKE '%' || :query || '%') AND (:since = 0 OR postedAt >= :since) AND (:unreadOnly = 0 OR isUnread = 1) ORDER BY postedAt DESC LIMIT 200")
     suspend fun searchNotificationsFiltered(query: String, since: Long, unreadOnly: Boolean): List<NotificationEntity>
-    @Query("UPDATE notifications SET isRead = 1 WHERE category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery')")
-    suspend fun markCategoryNotificationsRead(category: String)
+    @Query("UPDATE notifications SET isUnread = 0, readAt = :now WHERE deletedAt IS NULL AND (category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery'))")
+    suspend fun markCategoryNotificationsRead(category: String, now: Long = System.currentTimeMillis())
+    @Query("UPDATE notifications SET isUnread = 1, readAt = NULL WHERE deletedAt IS NULL AND (category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery'))")
+    suspend fun markCategoryNotificationsUnread(category: String)
     @Query("UPDATE notifications SET category = :category WHERE id = :id")
     suspend fun updateNotificationCategory(id: Long, category: String)
-    @Query("UPDATE notifications SET isRead = 1 WHERE id = :id")
-    suspend fun markNotificationRead(id: Long)
+    @Query("UPDATE notifications SET isUnread = 0, readAt = :now WHERE id = :id AND deletedAt IS NULL")
+    suspend fun markNotificationRead(id: Long, now: Long = System.currentTimeMillis())
+    @Query("UPDATE notifications SET isUnread = 1, readAt = NULL WHERE id = :id AND deletedAt IS NULL")
+    suspend fun markNotificationUnread(id: Long)
     @Query("UPDATE notifications SET category = :category WHERE packageName = :packageName")
     suspend fun updateNotificationCategoryForPackage(packageName: String, category: String)
-    @Query("UPDATE notifications SET isRead = 1 WHERE packageName = :packageName")
-    suspend fun markPackageNotificationsRead(packageName: String)
+    @Query("UPDATE notifications SET isUnread = 0, readAt = :now WHERE deletedAt IS NULL AND packageName = :packageName")
+    suspend fun markPackageNotificationsRead(packageName: String, now: Long = System.currentTimeMillis())
+    @Query("UPDATE notifications SET isUnread = 0, readAt = :now WHERE id IN (:ids) AND deletedAt IS NULL")
+    suspend fun markNotificationsRead(ids: List<Long>, now: Long = System.currentTimeMillis())
+    @Query("UPDATE notifications SET deletedAt = :deletedAt WHERE id IN (:ids) AND deletedAt IS NULL")
+    suspend fun softDeleteNotifications(ids: List<Long>, deletedAt: Long)
+    @Query("UPDATE notifications SET deletedAt = NULL WHERE id IN (:ids) AND deletedAt = :deletedAt")
+    suspend fun undoSoftDeleteNotifications(ids: List<Long>, deletedAt: Long)
+    @Query("DELETE FROM notifications WHERE deletedAt IS NOT NULL AND deletedAt <= :purgeBefore")
+    suspend fun purgeSoftDeletedNotifications(purgeBefore: Long)
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL AND (:category = '' OR category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery')) AND (:since = 0 OR postedAt >= :since) AND (:before = 0 OR postedAt < :before) ORDER BY postedAt DESC LIMIT 500")
+    suspend fun notificationsForDelete(category: String, since: Long, before: Long): List<NotificationEntity>
+    @Query("SELECT COUNT(*) FROM notifications WHERE deletedAt IS NULL AND (:category = '' OR category = :category OR (:category = 'Messages/SMS' AND category = 'Messages (SMS)') OR (:category = 'Food' AND category = 'Food and delivery')) AND (:since = 0 OR postedAt >= :since) AND (:before = 0 OR postedAt < :before)")
+    suspend fun countNotificationsForDelete(category: String, since: Long, before: Long): Int
     @Query("DELETE FROM notifications WHERE postedAt < :before")
     suspend fun deleteNotificationsBefore(before: Long)
     @Query("DELETE FROM notifications WHERE dedupeKey = :key") suspend fun deleteNotificationByDedupeKey(key: String)
-    @Query("SELECT * FROM notifications ORDER BY postedAt") suspend fun allNotificationsForBackup(): List<NotificationEntity>
+    @Query("SELECT * FROM notifications WHERE deletedAt IS NULL ORDER BY postedAt") suspend fun allNotificationsForBackup(): List<NotificationEntity>
     @Query("DELETE FROM notifications") suspend fun clearNotifications()
     @Insert(onConflict = OnConflictStrategy.REPLACE) suspend fun insertNotifications(rows: List<NotificationEntity>)
 

@@ -22,7 +22,7 @@ class BrainDatabaseMigrationTest {
     )
 
     @Test fun version3RowsMigrateToTypedRepliesAndCurrentNotificationFamilies() {
-        val name = "brain-migration-3-4"
+        val name = "brain-migration-3-5"
         helper.createDatabase(name, 3).apply {
             execSQL("INSERT INTO messages (id, role, text, timestamp) VALUES (1, 'assistant', 'keep this answer', 1234)")
             insertNotification(this, 1, "com.android.server.telecom", "System")
@@ -37,18 +37,22 @@ class BrainDatabaseMigrationTest {
             close()
         }
 
-        val migrated = helper.runMigrationsAndValidate(name, 4, true, BrainDatabase.MIGRATION_3_4)
+        val migrated = helper.runMigrationsAndValidate(name, 5, true, BrainDatabase.MIGRATION_3_4, BrainDatabase.MIGRATION_4_5)
         migrated.query("SELECT text, replyJson FROM messages WHERE id = 1").use { cursor ->
             assertTrue(cursor.moveToFirst())
             assertEquals("keep this answer", cursor.getString(0))
             assertTrue("Existing messages should start with no typed payload", cursor.isNull(1))
         }
-        migrated.query("SELECT packageName, category, isRead FROM notifications ORDER BY id").use { cursor ->
+        migrated.query("SELECT packageName, category, isUnread, readAt, deletedAt FROM notifications ORDER BY id").use { cursor ->
             val actual = linkedMapOf<String, String>()
-            val readFlags = linkedMapOf<String, Boolean>()
+            val unreadFlags = linkedMapOf<String, Boolean>()
+            val readTimes = linkedMapOf<String, Long?>()
+            val deletedRows = mutableListOf<String>()
             while (cursor.moveToNext()) {
                 actual[cursor.getString(0)] = cursor.getString(1)
-                readFlags[cursor.getString(0)] = cursor.getInt(2) == 1
+                unreadFlags[cursor.getString(0)] = cursor.getInt(2) == 1
+                readTimes[cursor.getString(0)] = if (cursor.isNull(3)) null else cursor.getLong(3)
+                if (!cursor.isNull(4)) deletedRows += cursor.getString(0)
             }
             assertEquals("Calls", actual["com.android.server.telecom"])
             assertEquals("Calls", actual["com.android.phone"])
@@ -59,8 +63,9 @@ class BrainDatabaseMigrationTest {
             assertEquals("System", actual["com.miui.appstore"])
             assertEquals("Finance", actual["com.xiaomi.finance"])
             assertEquals("Other", actual["com.google.android.apps.messages"])
-            assertFalse(readFlags["com.android.server.telecom"] ?: true)
-            assertTrue(readFlags["com.xiaomi.finance"] ?: false)
+            assertTrue("Every legacy row should migrate as read", unreadFlags.values.none { it })
+            assertTrue("readAt should retain each postedAt timestamp", readTimes.values.all { it == 1234L })
+            assertTrue("Legacy rows should not be soft-deleted", deletedRows.isEmpty())
         }
         migrated.close()
     }

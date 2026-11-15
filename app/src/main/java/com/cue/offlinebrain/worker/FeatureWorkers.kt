@@ -120,8 +120,7 @@ class NotificationListenerHealthWorker(context: Context, params: WorkerParameter
                 CrashLog.record("NOTIFICATIONS", "periodic listener check found access permission off")
                 return@withContext Result.success()
             }
-            val fixed = NotificationAccessState.repair(applicationContext)
-            val result = when { NotificationAccessState.connected -> "connected"; fixed -> "rebind requested"; else -> "repair unavailable" }
+            val result = if (NotificationAccessState.connected) "connected" else "disconnected; user repair only"
             state.edit().putString("listener_check_result", result).apply()
             FeatureWorkStatus.record(applicationContext, FeatureWorkScheduler.LISTENER_HEALTH_NAME, result)
             CrashLog.record("NOTIFICATIONS", "WorkManager listener health check result=$result")

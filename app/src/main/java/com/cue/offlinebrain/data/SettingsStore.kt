@@ -59,6 +59,11 @@ data class AppSettings(
     val notificationLiveCaptureEnabled: Boolean = false,
     val notificationCaptureConfigured: Boolean = false,
     val notificationKeepAliveEnabled: Boolean = false,
+    val notificationInAppAlertsEnabled: Boolean = true,
+    val notificationSpeakNewEnabled: Boolean = false,
+    val notificationChatAlertsEnabled: Boolean = true,
+    val notificationMutedPackages: String = "",
+    val notificationMutedCategories: String = "",
     val mirrorAlarmsToSystemClock: Boolean = false,
     val macroTutorialSeen: Boolean = false
 )
@@ -105,6 +110,11 @@ class SettingsStore(private val context: Context) {
         val notificationCategoryOverrides = stringPreferencesKey("notification_category_overrides")
         val notificationLiveCaptureEnabled = booleanPreferencesKey("notification_live_capture_enabled")
         val notificationKeepAliveEnabled = booleanPreferencesKey("notification_keep_alive_enabled")
+        val notificationInAppAlertsEnabled = booleanPreferencesKey("notification_in_app_alerts_enabled")
+        val notificationSpeakNewEnabled = booleanPreferencesKey("notification_speak_new_enabled")
+        val notificationChatAlertsEnabled = booleanPreferencesKey("notification_chat_alerts_enabled")
+        val notificationMutedPackages = stringPreferencesKey("notification_muted_packages")
+        val notificationMutedCategories = stringPreferencesKey("notification_muted_categories")
         val mirrorAlarmsToSystemClock = booleanPreferencesKey("mirror_alarms_to_system_clock")
         val macroTutorialSeen = booleanPreferencesKey("macro_tutorial_seen")
     }
@@ -145,6 +155,11 @@ class SettingsStore(private val context: Context) {
             notificationLiveCaptureEnabled = prefs[Keys.notificationLiveCaptureEnabled] ?: false,
             notificationCaptureConfigured = prefs.contains(Keys.notificationLiveCaptureEnabled),
             notificationKeepAliveEnabled = prefs[Keys.notificationKeepAliveEnabled] ?: false,
+            notificationInAppAlertsEnabled = prefs[Keys.notificationInAppAlertsEnabled] ?: true,
+            notificationSpeakNewEnabled = prefs[Keys.notificationSpeakNewEnabled] ?: false,
+            notificationChatAlertsEnabled = prefs[Keys.notificationChatAlertsEnabled] ?: true,
+            notificationMutedPackages = prefs[Keys.notificationMutedPackages].orEmpty(),
+            notificationMutedCategories = prefs[Keys.notificationMutedCategories].orEmpty(),
             mirrorAlarmsToSystemClock = prefs[Keys.mirrorAlarmsToSystemClock] ?: false,
             macroTutorialSeen = prefs[Keys.macroTutorialSeen] ?: false
         )
@@ -189,6 +204,14 @@ class SettingsStore(private val context: Context) {
         context.getSharedPreferences("notification_keep_alive", Context.MODE_PRIVATE).edit().putBoolean("enabled", value).apply()
     }
     suspend fun setNotificationLiveCaptureEnabled(value: Boolean) { context.brainSettings.edit { it[Keys.notificationLiveCaptureEnabled] = value } }
+    suspend fun setNotificationInAppAlertsEnabled(value: Boolean) { context.brainSettings.edit { it[Keys.notificationInAppAlertsEnabled] = value } }
+    suspend fun setNotificationSpeakNewEnabled(value: Boolean) { context.brainSettings.edit { it[Keys.notificationSpeakNewEnabled] = value } }
+    suspend fun setNotificationChatAlertsEnabled(value: Boolean) { context.brainSettings.edit { it[Keys.notificationChatAlertsEnabled] = value } }
+    suspend fun setNotificationMutedPackages(value: String) { context.brainSettings.edit { it[Keys.notificationMutedPackages] = cleanPackageList(value) } }
+    suspend fun setNotificationMutedCategories(value: String) {
+        val clean = value.lines().map { it.trim().take(40) }.filter(String::isNotBlank).distinctBy { it.lowercase() }.take(50).joinToString("\n")
+        context.brainSettings.edit { it[Keys.notificationMutedCategories] = clean }
+    }
     suspend fun setMirrorAlarmsToSystemClock(value: Boolean) { context.brainSettings.edit { it[Keys.mirrorAlarmsToSystemClock] = value } }
     suspend fun setMacroTutorialSeen(seen: Boolean = true) { context.brainSettings.edit { it[Keys.macroTutorialSeen] = seen } }
     suspend fun setNotificationCategoryOverride(packageName: String, category: String) {
@@ -233,6 +256,11 @@ class SettingsStore(private val context: Context) {
             // Restored backups do not silently restart collection or a persistent listener service.
             prefs[Keys.notificationLiveCaptureEnabled] = false
             prefs[Keys.notificationKeepAliveEnabled] = false
+            prefs[Keys.notificationInAppAlertsEnabled] = payload.optBoolean("notificationInAppAlertsEnabled", true)
+            prefs[Keys.notificationSpeakNewEnabled] = payload.optBoolean("notificationSpeakNewEnabled", false)
+            prefs[Keys.notificationChatAlertsEnabled] = payload.optBoolean("notificationChatAlertsEnabled", true)
+            prefs[Keys.notificationMutedPackages] = cleanPackageList(payload.optString("notificationMutedPackages"))
+            prefs[Keys.notificationMutedCategories] = payload.optString("notificationMutedCategories").lines().map { it.trim().take(40) }.filter(String::isNotBlank).distinctBy { it.lowercase() }.take(50).joinToString("\n")
             prefs[Keys.mirrorAlarmsToSystemClock] = payload.optBoolean("mirrorAlarmsToSystemClock", false)
             prefs[Keys.learnedPhrases] = phrases.joinToString("\n") { "${it.intent}|${it.phrase}|${it.argument}" }
         }
@@ -262,6 +290,11 @@ class SettingsStore(private val context: Context) {
             .put("notificationCategoryOverrides", p.notificationCategoryOverrides)
             .put("notificationLiveCaptureEnabled", p.notificationLiveCaptureEnabled)
             .put("notificationKeepAliveEnabled", p.notificationKeepAliveEnabled)
+            .put("notificationInAppAlertsEnabled", p.notificationInAppAlertsEnabled)
+            .put("notificationSpeakNewEnabled", p.notificationSpeakNewEnabled)
+            .put("notificationChatAlertsEnabled", p.notificationChatAlertsEnabled)
+            .put("notificationMutedPackages", p.notificationMutedPackages)
+            .put("notificationMutedCategories", p.notificationMutedCategories)
             .put("mirrorAlarmsToSystemClock", p.mirrorAlarmsToSystemClock).put("macroTutorialSeen", p.macroTutorialSeen)
             .put("lastIntent", p.lastIntent).put("lastCity", p.lastCity).put("lastAlarmRequest", p.lastAlarmRequest)
             .put("learnedPhrases", org.json.JSONArray().apply { p.learnedPhrases.forEach { put(JSONObject().put("phrase", it.phrase).put("intent", it.intent).put("argument", it.argument)) } })
@@ -310,6 +343,11 @@ class SettingsStore(private val context: Context) {
             prefs[Keys.notificationCategoryOverrides] = payload.optString("notificationCategoryOverrides").lines().take(100).joinToString("\n")
             prefs[Keys.notificationLiveCaptureEnabled] = payload.optBoolean("notificationLiveCaptureEnabled", false)
             prefs[Keys.notificationKeepAliveEnabled] = payload.optBoolean("notificationKeepAliveEnabled", false)
+            prefs[Keys.notificationInAppAlertsEnabled] = payload.optBoolean("notificationInAppAlertsEnabled", true)
+            prefs[Keys.notificationSpeakNewEnabled] = payload.optBoolean("notificationSpeakNewEnabled", false)
+            prefs[Keys.notificationChatAlertsEnabled] = payload.optBoolean("notificationChatAlertsEnabled", true)
+            prefs[Keys.notificationMutedPackages] = cleanPackageList(payload.optString("notificationMutedPackages"))
+            prefs[Keys.notificationMutedCategories] = payload.optString("notificationMutedCategories").lines().map { it.trim().take(40) }.filter(String::isNotBlank).distinctBy { it.lowercase() }.take(50).joinToString("\n")
             prefs[Keys.mirrorAlarmsToSystemClock] = payload.optBoolean("mirrorAlarmsToSystemClock", false)
             prefs[Keys.macroTutorialSeen] = payload.optBoolean("macroTutorialSeen", false)
             prefs[Keys.lastIntent] = payload.optString("lastIntent").take(32)

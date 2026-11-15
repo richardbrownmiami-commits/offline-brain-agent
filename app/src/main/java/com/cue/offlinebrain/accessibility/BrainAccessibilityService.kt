@@ -203,7 +203,7 @@ class BrainAccessibilityService : AccessibilityService() {
                         null
                     }
                     CommandActionKind.WEB_SEARCH -> withContext(Dispatchers.Main.immediate) {
-                        val imageSearch = Regex("(?i)^images?\\b").containsMatchIn(action.value.trim())
+                        val imageSearch = action.imageSearch || Regex("(?i)^images?\\b").containsMatchIn(action.value.trim())
                         val uri = Uri.parse("https://www.google.com/search").buildUpon()
                             .appendQueryParameter("q", action.value)
                             .apply { if (imageSearch) appendQueryParameter("tbm", "isch") }

@@ -48,6 +48,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -115,6 +116,11 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
     val scope = rememberCoroutineScope()
     var allowlist by rememberSaveable(settings.notificationAllowlist) { mutableStateOf(settings.notificationAllowlist) }
     var blocklist by rememberSaveable(settings.notificationBlocklist) { mutableStateOf(settings.notificationBlocklist) }
+    var mutedPackages by rememberSaveable(settings.notificationMutedPackages) { mutableStateOf(settings.notificationMutedPackages) }
+    var mutedCategories by rememberSaveable(settings.notificationMutedCategories) { mutableStateOf(settings.notificationMutedCategories) }
+    var bannersEnabled by rememberSaveable(settings.notificationInAppAlertsEnabled) { mutableStateOf(settings.notificationInAppAlertsEnabled) }
+    var speakNewEnabled by rememberSaveable(settings.notificationSpeakNewEnabled) { mutableStateOf(settings.notificationSpeakNewEnabled) }
+    var chatAlertsEnabled by rememberSaveable(settings.notificationChatAlertsEnabled) { mutableStateOf(settings.notificationChatAlertsEnabled) }
     var replyTo by remember { mutableStateOf<NotificationEntity?>(null) }
     var replyText by remember { mutableStateOf("") }
     var query by rememberSaveable { mutableStateOf("") }
@@ -124,14 +130,23 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
     var listenerEnabled by remember { mutableStateOf(NotificationAccessState.enabled(context)) }
     var listenerConnected by remember { mutableStateOf(NotificationAccessState.connected) }
     val pipelineState by NotificationPipelineTelemetry.snapshot.collectAsStateWithLifecycle()
+    val binding by NotificationAccessState.binding.collectAsStateWithLifecycle()
     var testingCapture by remember { mutableStateOf(false) }
     var captureTestResult by remember { mutableStateOf<String?>(null) }
+    var testingBinding by remember { mutableStateOf(false) }
+    var bindingTestResult by remember { mutableStateOf<String?>(null) }
     val listenerState = context.getSharedPreferences("notification_capture_state", Context.MODE_PRIVATE)
-    DisposableEffect(lifecycleOwner, context) {
+    DisposableEffect(lifecycleOwner, context, settings.notificationLiveCaptureEnabled) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 listenerEnabled = NotificationAccessState.enabled(context)
                 listenerConnected = NotificationAccessState.connected
+                if (settings.notificationLiveCaptureEnabled && listenerEnabled) {
+                    scope.launch {
+                        NotificationAccessState.ensureConnected(context, "notifications-tab")
+                        listenerConnected = NotificationAccessState.connected
+                    }
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -177,12 +192,32 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
                 }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Column(Modifier.weight(1f)) {
-                        Text("MIUI listener keep-alive", fontWeight = FontWeight.Medium)
-                        Text("Optional. Shows a persistent Stop notification and asks Android to check again about every 6 hours. It cannot override MIUI battery rules.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+                        Text("Always on mode", fontWeight = FontWeight.Medium)
+                        Text(if (settings.notificationKeepAliveEnabled) "On · visible keep-alive and a six-hour health check are enabled." else "Off · On-demand is the default; the listener stays bound while Cue is open and disconnects in the background.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
                     }
                     Switch(settings.notificationKeepAliveEnabled, { vm.setNotificationKeepAliveEnabled(it) })
                 }
-                Text("On Redmi/MIUI, also allow Background autostart, choose No restrictions for battery use, and lock the app in Recents if your version offers that option. The keep-alive can be stopped here or from its notification.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("On-demand saves new notifications only while the listener is connected. Notifications dismissed while it is unbound are not saved; only notifications still in the shade can be caught on reconnect. Always on uses more battery and shows a persistent Stop notification; its six-hour WorkManager check may run late and reports status only—it never repairs the listener automatically.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+                Text("On Redmi/MIUI, Android may still require Background autostart, No restrictions for battery use, or locking Cue in Recents. Always on cannot override those system rules.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+            }
+            FeatureCard("In-app alerts") {
+                Text("Successful captures can show a short in-app banner and a New item in Chat. Mute lists affect alerts only; matching notifications are still saved in local history. Calls and SMS previews hide their body; OTP digits are masked in speech unless you choose Read code.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) { Text("In-app banner"); Text("Queued briefly; dismissible", color = MutedText, fontSize = 12.sp) }
+                    Switch(bannersEnabled, { value -> bannersEnabled = value; vm.setNotificationAlertOptions(value, speakNewEnabled, chatAlertsEnabled) })
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) { Text("Speak new"); Text("Off by default · uses phone TTS settings", color = MutedText, fontSize = 12.sp) }
+                    Switch(speakNewEnabled, { value -> speakNewEnabled = value; vm.setNotificationAlertOptions(bannersEnabled, value, chatAlertsEnabled) })
+                }
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) { Text("Show new items in Chat"); Text("Creates a local assistant card", color = MutedText, fontSize = 12.sp) }
+                    Switch(chatAlertsEnabled, { value -> chatAlertsEnabled = value; vm.setNotificationAlertOptions(bannersEnabled, speakNewEnabled, value) })
+                }
+                OutlinedTextField(mutedPackages, { mutedPackages = it }, Modifier.fillMaxWidth(), label = { Text("Mute alert apps · package name per line") }, minLines = 2)
+                OutlinedTextField(mutedCategories, { mutedCategories = it }, Modifier.fillMaxWidth(), label = { Text("Mute alert categories · one per line") }, minLines = 2)
+                Text("Known categories: ${NotificationCategory.labels.joinToString(", ")}", color = MutedText, fontSize = 11.sp)
+                Button(onClick = { vm.setNotificationAlertMutes(mutedPackages, mutedCategories) }, modifier = Modifier.fillMaxWidth()) { Text("Save alert mutes") }
             }
             FeatureCard("Why is nothing saved?") {
                 Text("These counts start when the app process starts. They show callback decisions, not notification text.", color = MutedText, fontSize = 12.sp, lineHeight = 17.sp)
@@ -201,7 +236,24 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
                     ?.let { DateFormat.getDateTimeInstance().format(Date(it)) } ?: "not recorded"
                 val disconnectedAt = NotificationAccessState.lastDisconnectedAt(context).takeIf { it > 0L }
                     ?.let { DateFormat.getDateTimeInstance().format(Date(it)) } ?: "not recorded"
-                Text("Listener times · connected: $connectedAt · disconnected: $disconnectedAt", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+                val unboundAt = NotificationAccessState.lastUnboundAt(context).takeIf { it > 0L }
+                    ?.let { DateFormat.getDateTimeInstance().format(Date(it)) } ?: "not recorded"
+                val idleSeconds = binding.secondsIdle(android.os.SystemClock.elapsedRealtime())
+                Text("Binding ${binding.state} · idle ${idleSeconds}s · rebinds ${binding.rebindRequests} · connects ${binding.connectCount} · unbinds ${binding.unbindCount} · posts ${binding.notificationCount}", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+                Text("Listener times · connected: $connectedAt · disconnected: $disconnectedAt · unbound: $unboundAt (${NotificationAccessState.lastUnbindReason(context)})", color = MutedText, fontSize = 11.sp, lineHeight = 16.sp)
+                OutlinedButton(
+                    onClick = {
+                        scope.launch {
+                            testingBinding = true
+                            bindingTestResult = NotificationAccessState.testUnbindRebind(context)
+                            listenerConnected = NotificationAccessState.connected
+                            testingBinding = false
+                        }
+                    },
+                    enabled = listenerEnabled && !settings.notificationKeepAliveEnabled && !testingBinding,
+                    modifier = Modifier.fillMaxWidth().height(50.dp)
+                ) { Text(if (testingBinding) "Testing unbind/rebind…" else "Test unbind/rebind") }
+                bindingTestResult?.let { Text(it, color = if (it.startsWith("PASS")) MaterialTheme.colorScheme.secondary else MutedText, fontSize = 12.sp, lineHeight = 17.sp) }
                 if (pipelineState.recent.isNotEmpty()) {
                     Text("Last ${pipelineState.recent.size} decisions · app + reason only:", fontWeight = FontWeight.Medium, fontSize = 12.sp)
                     pipelineState.recent.forEach { decision ->
@@ -293,7 +345,7 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
                     }
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    OutlinedButton(onClick = { vm.markAllNotificationsRead() }, modifier = Modifier.weight(1f)) { Text("Mark all read") }
+                    OutlinedButton(onClick = { vm.markAllNotificationsUnread() }, modifier = Modifier.weight(1f)) { Text("Mark all unread") }
                     OutlinedButton(onClick = { clearTarget = selectedCategory ?: "__ALL__" }, modifier = Modifier.weight(1f)) { Text(if (selectedCategory == null) "Clear all" else "Clear category") }
                 }
             }
@@ -322,7 +374,7 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
                     onReply = { replyTo = row; replyText = "" },
                     onReadAloud = { spokenText ->
                         scope.launch {
-                            runCatching { VoiceSpeechOutput.speakOnce(context, spokenText) }
+                            runCatching { VoiceSpeechOutput.speakOnce(context, spokenText, takeAudioFocus = true) }
                                 .onFailure { CrashLog.record("NOTIFICATIONS", "read aloud action failed", it); vm.setToast("Could not read that notification aloud.") }
                         }
                     },
@@ -335,6 +387,7 @@ fun NotificationsScreen(feature: NotificationViewModel, settings: AppSettings, o
                             .onFailure { CrashLog.record("NOTIFICATIONS", "notification copy action failed", it); vm.setToast("Could not copy that notification.") }
                     },
                     onMarkRead = { vm.markNotificationRead(row.id) },
+                    onMarkUnread = { vm.markNotificationUnread(row.id) },
                     onMoveCategory = { label -> vm.setNotificationCategoryOverride(row.packageName, label) }
                 )
             }
@@ -377,10 +430,12 @@ private fun NotificationItemCard(
     onReadAloud: (String) -> Unit,
     onCopy: (String) -> Unit,
     onMarkRead: () -> Unit,
+    onMarkUnread: () -> Unit,
     onMoveCategory: (String) -> Unit
 ) {
     var showText by rememberSaveable(row.id) { mutableStateOf(false) }
     var categoryExpanded by remember { mutableStateOf(false) }
+    LaunchedEffect(row.id, row.isUnread) { if (row.isUnread) onMarkRead() }
     val sender = row.title.ifBlank { if (row.category == "Calls") "Caller not identified" else "Sender not identified" }
     val privateCategory = row.category == "Calls" || row.category == "Messages/SMS" || row.category == "Messages (SMS)"
     val safePreview = when (row.category) {
@@ -397,11 +452,11 @@ private fun NotificationItemCard(
                     Text(appLabel, fontWeight = FontWeight.SemiBold, fontSize = 14.sp)
                     Text(sender, color = MutedText, fontSize = 12.sp, lineHeight = 16.sp)
                 }
-                if (!row.isRead) Text("NEW", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 10.sp)
+                if (row.isUnread) Text("NEW", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold, fontSize = 10.sp)
             }
             if (row.groupName.isNotBlank()) Text("Chat · ${row.groupName}", color = MaterialTheme.colorScheme.secondary, fontSize = 12.sp)
             Text(safePreview, color = MutedText, fontSize = 13.sp, lineHeight = 18.sp)
-            Text("${row.category} · ${DateUtils.getRelativeTimeSpanString(row.postedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()} · ${if (row.isRead) "read" else "unread"}", color = MutedText, fontSize = 11.sp)
+            Text("${row.category} · ${DateUtils.getRelativeTimeSpanString(row.postedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS).toString()} · ${if (row.isUnread) "unread" else "read"}", color = MutedText, fontSize = 11.sp)
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(onClick = onOpen, modifier = Modifier.weight(1f)) { Text("Open app") }
                 if (canReply) OutlinedButton(onClick = onReply, modifier = Modifier.weight(1f)) { Text("Reply") }
@@ -409,7 +464,7 @@ private fun NotificationItemCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 OutlinedButton(onClick = { onCopy(safePreview) }, modifier = Modifier.weight(1f)) { Text("Copy") }
-                if (!row.isRead) OutlinedButton(onClick = onMarkRead, modifier = Modifier.weight(1f)) { Text("Mark read") }
+                if (!row.isUnread) OutlinedButton(onClick = onMarkUnread, modifier = Modifier.weight(1f)) { Text("Mark unread") }
                 Box(Modifier.weight(1f)) {
                     OutlinedButton(onClick = { categoryExpanded = true }, modifier = Modifier.fillMaxWidth()) { Text("Move category") }
                     DropdownMenu(expanded = categoryExpanded, onDismissRequest = { categoryExpanded = false }) {

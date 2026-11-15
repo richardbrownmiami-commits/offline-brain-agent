@@ -79,10 +79,18 @@ class NotificationBurstGuard(private val windowMillis: Long = 1_000L) {
 
 /** Keep call/SMS body text out of default notification summaries. */
 object NotificationPrivacyFormatter {
+    private val otpPattern = Regex("(?i)\\b(otp|one[- ]time (?:password|code)|verification code|security code|passcode|code)\\b([^\\d]{0,20})(\\d{4,8})\\b")
+
     fun line(category: String, sender: String, body: String, includeMessageBody: Boolean = false): String = when (category) {
         "Calls" -> sender.ifBlank { "Caller not identified" }
         "Messages/SMS", "Messages (SMS)" -> if (includeMessageBody) "$sender: $body".trim(':', ' ') else sender.ifBlank { "Sender not identified" }
         "Chat" -> listOf(sender, body).filter { it.isNotBlank() }.joinToString(": ").ifBlank { "Chat message" }
         else -> listOf(sender, body).filter { it.isNotBlank() }.joinToString(": ").ifBlank { "Notification" }
+    }
+
+    fun containsOtpCode(text: String): Boolean = otpPattern.containsMatchIn(text)
+
+    fun maskOtpCodes(text: String): String = otpPattern.replace(text) { match ->
+        "${match.groupValues[1]}${match.groupValues[2]}digits hidden"
     }
 }

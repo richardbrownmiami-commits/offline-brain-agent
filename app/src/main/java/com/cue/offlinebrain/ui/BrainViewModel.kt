@@ -82,6 +82,7 @@ import java.io.InputStream
 import kotlinx.coroutines.flow.first
 
 data class MacroRunFailure(val macro: MacroEntity, val stepIndex: Int, val stepCount: Int, val message: String)
+data class NotificationDeleteUndo(val ids: List<Long>, val deletedAt: Long, val expiresAt: Long)
 
 class BrainViewModel(application: Application) : AndroidViewModel(application) {
     private val app = application as OfflineBrainApplication
@@ -97,6 +98,8 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
     val alarms: StateFlow<List<AlarmEntity>> = app.database.dao().observeAlarms().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val notificationHistory: StateFlow<List<NotificationEntity>> = app.database.dao().observeNotificationHistory().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val notificationCategoryCounts = app.database.dao().observeNotificationCategoryCounts().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    private val _notificationDeleteUndo = MutableStateFlow<NotificationDeleteUndo?>(null)
+    val notificationDeleteUndo: StateFlow<NotificationDeleteUndo?> = _notificationDeleteUndo.asStateFlow()
     val clipboardHistory: StateFlow<List<ClipboardEntryEntity>> = app.database.dao().observeClipboardHistory().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val automationRules: StateFlow<List<AutomationRuleEntity>> = app.database.dao().observeAutomationRules().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val macros: StateFlow<List<MacroEntity>> = app.database.dao().observeMacros().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -647,7 +650,12 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
     fun setNotificationLiveCaptureEnabled(value: Boolean) {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { app.settings.setNotificationLiveCaptureEnabled(value) }
-                .onSuccess { _toast.value = if (value) "Live capture requested. Grant Android Notification Access if it is not already on." else "Live capture is off. Saved notification history was kept." }
+                .onSuccess {
+                    if (value && NotificationAccessState.enabled(getApplication())) {
+                        NotificationAccessState.requestOnDemandRebind(getApplication(), "capture-enabled")
+                    }
+                    _toast.value = if (value) "Live capture requested. Grant Android Notification Access if it is not already on." else "Live capture is off. Saved notification history was kept."
+                }
                 .onFailure { CrashLog.record("NOTIFICATIONS", "live capture setting failed", it); _toast.value = "Live capture setting could not be saved." }
         }
     }
@@ -677,6 +685,30 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { CrashLog.record("NOTIFICATIONS", "app filters could not be saved", it); _toast.value = "Notification filters could not be saved." }
         }
     }
+    fun setNotificationAlertOptions(banners: Boolean, speakNew: Boolean, chatCards: Boolean) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                app.settings.setNotificationInAppAlertsEnabled(banners)
+                app.settings.setNotificationSpeakNewEnabled(speakNew)
+                app.settings.setNotificationChatAlertsEnabled(chatCards)
+            } catch (error: Exception) {
+                CrashLog.record("NOTIFICATIONS", "alert options could not be saved", error)
+                _toast.value = "Notification alert settings could not be saved."
+            }
+        }
+    }
+    fun setNotificationAlertMutes(packages: String, categories: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                app.settings.setNotificationMutedPackages(packages)
+                app.settings.setNotificationMutedCategories(categories)
+                _toast.value = "Alert mute lists saved. Notifications remain saved in history."
+            } catch (error: Exception) {
+                CrashLog.record("NOTIFICATIONS", "alert mute lists could not be saved", error)
+                _toast.value = "Alert mute lists could not be saved."
+            }
+        }
+    }
     fun setNotificationCategoryOverride(packageName: String, category: String) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -698,6 +730,13 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
                 .onFailure { _toast.value = "Notifications could not be updated." }
         }
     }
+    fun markAllNotificationsUnread() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { app.database.dao().markAllNotificationsUnread() }
+                .onSuccess { _toast.value = "All saved notifications marked unread." }
+                .onFailure { _toast.value = "Notifications could not be updated." }
+        }
+    }
     fun markNotificationRead(id: Long) {
         viewModelScope.launch(Dispatchers.IO) {
             try {
@@ -708,6 +747,53 @@ class BrainViewModel(application: Application) : AndroidViewModel(application) {
                 CrashLog.record("NOTIFICATIONS", "single notification read state could not be saved", error)
                 _toast.value = "This notification could not be marked as read."
             }
+        }
+    }
+    fun markNotificationUnread(id: Long) {
+        viewModelScope.launch(Dispatchers.IO) {
+            try { app.database.dao().markNotificationUnread(id) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) {
+                CrashLog.record("NOTIFICATIONS", "single notification unread state could not be saved", error)
+                _toast.value = "This notification could not be marked unread."
+            }
+        }
+    }
+    fun softDeleteNotifications(ids: List<Long>) {
+        if (ids.isEmpty()) return
+        val uniqueIds = ids.distinct().take(500)
+        val deletedAt = System.currentTimeMillis()
+        viewModelScope.launch(Dispatchers.IO) {
+            try {
+                app.database.dao().softDeleteNotifications(uniqueIds, deletedAt)
+                val undo = NotificationDeleteUndo(uniqueIds, deletedAt, deletedAt + 10_000L)
+                _notificationDeleteUndo.value = undo
+                _toast.value = "Moved ${uniqueIds.size} notification(s) to Recently deleted. Undo is available for 10 seconds."
+                delay(10_000L)
+                app.database.dao().purgeSoftDeletedNotifications(deletedAt)
+                if (_notificationDeleteUndo.value == undo) _notificationDeleteUndo.value = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                CrashLog.record("NOTIFICATIONS", "soft delete/purge failed", error)
+                _toast.value = "Notifications could not be deleted."
+            }
+        }
+    }
+    fun undoNotificationDelete() {
+        val undo = _notificationDeleteUndo.value ?: return
+        if (System.currentTimeMillis() > undo.expiresAt) {
+            _notificationDeleteUndo.value = null
+            _toast.value = "The 10-second undo window has expired."
+            return
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { app.database.dao().undoSoftDeleteNotifications(undo.ids, undo.deletedAt) }
+                .onSuccess {
+                    if (_notificationDeleteUndo.value == undo) _notificationDeleteUndo.value = null
+                    _toast.value = "Notification deletion undone."
+                }
+                .onFailure { CrashLog.record("NOTIFICATIONS", "soft-delete undo failed", it); _toast.value = "Could not undo deletion." }
         }
     }
     fun clearNotificationCategory(category: String) {
