@@ -153,7 +153,12 @@ object EncryptedBackup {
         } })
         json.put("alarms", JSONArray().apply { dao.allAlarmsForBackup().forEach { put(JSONObject().put("id", it.id).put("label", it.label).put("triggerAt", it.triggerAt).put("cron", it.cron).put("enabled", it.enabled)) } })
         json.put("notes", JSONArray().apply { dao.allNotesForBackup().forEach { put(JSONObject().put("id", it.id).put("text", it.text).put("done", it.done).put("updatedAt", it.updatedAt)) } })
-        json.put("notifications", JSONArray().apply { dao.allNotificationsForBackup().forEach { put(JSONObject().put("id", it.id).put("packageName", it.packageName).put("title", it.title).put("text", it.text).put("postedAt", it.postedAt).put("dedupeKey", it.dedupeKey).put("textHash", it.textHash).put("category", it.category).put("isOngoing", it.isOngoing).put("groupName", it.groupName).put("isRead", it.isRead)) } })
+        json.put("notifications", JSONArray().apply { dao.allNotificationsForBackup().forEach { row ->
+            put(JSONObject().put("id", row.id).put("packageName", row.packageName).put("title", row.title).put("text", row.text)
+                .put("postedAt", row.postedAt).put("dedupeKey", row.dedupeKey).put("textHash", row.textHash)
+                .put("category", row.category).put("isOngoing", row.isOngoing).put("groupName", row.groupName)
+                .put("isUnread", row.isUnread).put("readAt", row.readAt ?: JSONObject.NULL))
+        } })
         json.put("rules", JSONArray().apply { dao.allAutomationRulesForBackup().forEach { put(JSONObject().put("id", it.id).put("triggerPhrase", it.triggerPhrase).put("actionText", it.actionText).put("enabled", it.enabled).put("createdAt", it.createdAt)) } })
         json.put("macros", JSONArray().apply { dao.allMacrosForBackup().forEach { put(JSONObject().put("id", it.id).put("name", it.name).put("steps", it.steps).put("updatedAt", it.updatedAt)) } })
         json.put("clipboard", JSONArray().apply { dao.allClipboardForBackup().forEach { put(JSONObject().put("id", it.id).put("text", it.text).put("copiedAt", it.copiedAt)) } })
@@ -204,9 +209,20 @@ object EncryptedBackup {
         val notes = root.array("notes").map { NoteEntity(it.getLong("id"), it.getString("text"), it.optBoolean("done"), it.getLong("updatedAt")) }
         val notifications = root.array("notifications").map { row ->
             val id = row.getLong("id")
-            NotificationEntity(id, row.getString("packageName"), row.getString("title"), row.getString("text"), row.getLong("postedAt"),
-                row.optString("dedupeKey").ifBlank { "backup-$id" }, row.optString("textHash").ifBlank { "backup-$id" },
-                row.optString("category", "Other"), row.optBoolean("isOngoing"), row.optString("groupName"), row.optBoolean("isRead"))
+            NotificationEntity(
+                id = id,
+                packageName = row.getString("packageName"),
+                title = row.getString("title"),
+                text = row.getString("text"),
+                postedAt = row.getLong("postedAt"),
+                dedupeKey = row.optString("dedupeKey").ifBlank { "backup-$id" },
+                textHash = row.optString("textHash").ifBlank { "backup-$id" },
+                category = row.optString("category", "Other"),
+                isOngoing = row.optBoolean("isOngoing"),
+                groupName = row.optString("groupName"),
+                isUnread = row.optBoolean("isUnread", !row.optBoolean("isRead", false)),
+                readAt = if (row.has("readAt") && !row.isNull("readAt")) row.optLong("readAt") else null
+            )
         }
         val rules = root.array("rules").map { AutomationRuleEntity(it.getLong("id"), it.getString("triggerPhrase"), it.getString("actionText"), it.optBoolean("enabled"), it.getLong("createdAt")) }
         val macros = root.array("macros").map { MacroEntity(it.getLong("id"), it.getString("name"), it.getString("steps"), it.getLong("updatedAt")) }

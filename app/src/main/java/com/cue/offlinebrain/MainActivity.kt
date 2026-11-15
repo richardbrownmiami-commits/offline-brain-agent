@@ -165,6 +165,7 @@ import com.cue.offlinebrain.device.DeviceStatusProvider
 import com.cue.offlinebrain.diagnostics.DiagnosticResult
 import com.cue.offlinebrain.ui.RestoreRecoveryScreen
 import com.cue.offlinebrain.ui.ChatScreen
+import com.cue.offlinebrain.ui.NotificationAlertHost
 import com.cue.offlinebrain.ui.DashboardScreen
 import com.cue.offlinebrain.ui.AlarmsScreen
 import com.cue.offlinebrain.ui.NotesScreen
@@ -194,6 +195,7 @@ import com.cue.offlinebrain.ui.VoiceSettingsScreen
 import com.cue.offlinebrain.ui.OnlineSettingsScreen
 import com.cue.offlinebrain.ui.PermissionsSettingsScreen
 import com.cue.offlinebrain.ui.AboutHelpScreen
+import com.cue.offlinebrain.notifications.NotificationAccessState
 import com.cue.offlinebrain.overlay.FloatingAssistantOverlayService
 import java.text.DateFormat
 import java.util.Calendar
@@ -205,6 +207,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 
 
 class MainActivity : FragmentActivity() {
@@ -253,6 +256,11 @@ class MainActivity : FragmentActivity() {
     override fun onResume() {
         super.onResume()
         activityResumed = true
+        lifecycleScope.launch {
+            val app = application as OfflineBrainApplication
+            val prefs = app.settings.settings.first()
+            NotificationAccessState.appResumed(this@MainActivity, requestBinding = prefs.notificationLiveCaptureEnabled)
+        }
         brainViewModel.refreshAccessibilityStatus()
         com.cue.offlinebrain.data.AppLockLifecycle.noteActivityResumed()
         updateClipboardListener()
@@ -263,6 +271,10 @@ class MainActivity : FragmentActivity() {
         activityResumed = false
         updateClipboardListener()
         super.onPause()
+    }
+    override fun onStop() {
+        NotificationAccessState.appBackgrounded(applicationContext)
+        super.onStop()
     }
 
     private fun updateClipboardListener() {
@@ -395,6 +407,7 @@ private fun OfflineBrainApp(
                 }
             }
         ) { padding ->
+            Box(Modifier.fillMaxSize()) {
             NavHost(navController = nav, startDestination = "self-check", modifier = Modifier.padding(padding)) {
                 composable("self-check") {
                     FirstRunSelfCheckScreen(
@@ -438,6 +451,8 @@ private fun OfflineBrainApp(
                 composable("notifications") { NotificationsScreen(notificationFeature, settings) { nav.popBackStack() } }
                 composable("clipboard") { ClipboardScreen(vm, settings) { nav.popBackStack() } }
                 composable("privacy") { PrivacyScreen(securityFeature, settings, { nav.popBackStack() }, section = "security") }
+            }
+            NotificationAlertHost(settings, Modifier.align(Alignment.TopCenter))
             }
         }
             }

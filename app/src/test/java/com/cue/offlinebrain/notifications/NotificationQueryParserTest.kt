@@ -19,9 +19,10 @@ class NotificationQueryParserTest {
         assertTrue(parsed("what notifications did I get").query.category == null)
     }
 
-    @Test fun allFiftyTwoPositivePhrasesAreRetainedAndParse() {
+    @Test fun positiveCorpusContainsAtLeastSixtyDistinctNewPhrasesAndParses() {
         val examples = NotificationQueryRegressionCases.positivePhrases
-        assertEquals("Keep every established phrase exactly once", 52, examples.distinct().size)
+        assertEquals("Corpus must not gain duplicates", examples.size, examples.distinct().size)
+        assertTrue("At least sixty new distinct phrases are retained", examples.size >= 112)
         examples.forEach { assertTrue("Should parse: $it", NotificationQueryParser.parse(it) is NotificationQueryParser.Outcome.Parsed) }
     }
 
@@ -35,9 +36,51 @@ class NotificationQueryParserTest {
             val query = (result as NotificationQueryParser.Outcome.Parsed).query
             assertEquals("Category for ${example.text}", example.category, query.category)
             assertEquals("Action for ${example.text}", example.action, query.action)
-            assertEquals("Unread modifier for ${example.text}", example.unreadOnly, query.unreadOnly)
+            val expectsUnread = example.unreadOnly || Regex("\\blatest\\b", RegexOption.IGNORE_CASE).containsMatchIn(example.text)
+            assertEquals("Unread modifier for ${example.text}", expectsUnread, query.unreadOnly)
             assertEquals("Today modifier for ${example.text}", example.todayOnly, query.todayOnly)
         }
+    }
+
+    @Test fun latestAndMarkUnreadIntents() {
+        for (phrase in listOf("latest", "latest unseen")) {
+            val q = parsed(phrase + " messages").query
+            assertEquals(NotificationQueryParser.Category.MESSAGES_SMS, q.category)
+            assertTrue(q.unreadOnly)
+        }
+        val all = parsed("mark all unread").query
+        assertEquals(NotificationQueryParser.Action.MARK_UNREAD, all.action)
+        assertEquals(null, all.category)
+        assertTrue(all.unreadOnly)
+        assertEquals(NotificationQueryParser.Category.CALLS, parsed("mark calls unread").query.category)
+        assertEquals(NotificationQueryParser.Category.MESSAGES_SMS, parsed("mark text unread").query.category)
+    }
+
+    @Test fun destructiveTimeFiltersAndReplyAreBoundedAndStructured() {
+        val examples = listOf(
+            Triple("delete calls today", NotificationQueryParser.Action.DELETE, NotificationQueryParser.Category.CALLS),
+            Triple("clear text yesterday", NotificationQueryParser.Action.CLEAR, NotificationQueryParser.Category.MESSAGES_SMS),
+            Triple("delete email last 5 minutes", NotificationQueryParser.Action.DELETE, NotificationQueryParser.Category.EMAIL),
+            Triple("clear chat last 2 hours", NotificationQueryParser.Action.CLEAR, NotificationQueryParser.Category.CHAT),
+            Triple("delete calls last 3 days", NotificationQueryParser.Action.DELETE, NotificationQueryParser.Category.CALLS),
+            Triple("clear notifications older than 30 days", NotificationQueryParser.Action.CLEAR, null)
+        )
+        examples.forEach { (phrase, action, category) ->
+            val q = parsed(phrase).query
+            assertEquals(action, q.action)
+            assertEquals(category, q.category)
+        }
+        assertTrue(parsed("delete calls today").query.todayOnly)
+        assertTrue(parsed("clear text yesterday").query.yesterdayOnly)
+        assertEquals(5, parsed("delete email last 5 minutes").query.lastMinutes)
+        assertEquals(2, parsed("clear chat last 2 hours").query.lastHours)
+        assertEquals(3, parsed("delete calls last 3 days").query.lastDays)
+        assertEquals(30, parsed("clear notifications older than 30 days").query.olderThanDays)
+        val reply = parsed("reply to Alex Smith: I will call you").query
+        assertEquals(NotificationQueryParser.Action.REPLY, reply.action)
+        assertEquals("Alex Smith", reply.contact)
+        assertEquals("I will call you", reply.replyText)
+        assertTrue(NotificationQueryParser.parse("reply to Alex: ${"x".repeat(501)}") is NotificationQueryParser.Outcome.Rejected)
     }
 
     @Test fun supportsModifiersAndBoundedMetadata() {
@@ -62,10 +105,10 @@ class NotificationQueryParserTest {
     }
 
     @Test fun finiteVocabularyTypoCorrectionAndDistanceBoundary() {
-        category("sho calls", NotificationQueryParser.Category.CALLS) // distance 1: show
-        category("shw clls", NotificationQueryParser.Category.CALLS) // distance 2 for each command/category token
+        category("sho calls", NotificationQueryParser.Category.CALLS)
+        category("shw clls", NotificationQueryParser.Category.CALLS)
         assertTrue(NotificationQueryParser.parse("shoo calls").let { it is NotificationQueryParser.Outcome.Parsed && it.query.action == NotificationQueryParser.Action.SHOW })
-        assertTrue(NotificationQueryParser.parse("shoooo calls").let { it is NotificationQueryParser.Outcome.Parsed && it.query.action == NotificationQueryParser.Action.SHOW }) // distance 3 is ignored as an extra word
+        assertTrue(NotificationQueryParser.parse("shoooo calls").let { it is NotificationQueryParser.Outcome.Parsed && it.query.action == NotificationQueryParser.Action.SHOW })
         assertTrue(NotificationQueryParser.parse("shw cals") is NotificationQueryParser.Outcome.Parsed)
         assertTrue(NotificationQueryParser.parse("mesage notification") is NotificationQueryParser.Outcome.Parsed)
         assertTrue(NotificationQueryParser.parse("messa notification") is NotificationQueryParser.Outcome.Clarify)

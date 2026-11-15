@@ -44,7 +44,9 @@ data class NotificationEntity(
     @ColumnInfo(defaultValue = "'Other'") val category: String = "Other",
     @ColumnInfo(defaultValue = "0") val isOngoing: Boolean = false,
     @ColumnInfo(defaultValue = "''") val groupName: String = "",
-    @ColumnInfo(defaultValue = "0") val isRead: Boolean = false
+    @ColumnInfo(defaultValue = "1") val isUnread: Boolean = true,
+    @ColumnInfo(defaultValue = "NULL") val readAt: Long? = null,
+    @ColumnInfo(defaultValue = "NULL") val deletedAt: Long? = null
 )
 
 data class NotificationCategoryCount(val category: String, val count: Int)

@@ -23,6 +23,7 @@ import android.os.SystemClock
 import android.view.WindowManager
 import android.view.HapticFeedbackConstants
 import android.provider.Settings
+import android.text.format.DateUtils
 import androidx.fragment.app.FragmentActivity
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -48,6 +49,7 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
 import androidx.compose.foundation.horizontalScroll
@@ -131,6 +133,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
@@ -138,6 +141,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.core.content.ContextCompat
 import androidx.core.content.IntentCompat
+import androidx.core.graphics.drawable.toBitmap
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
@@ -164,6 +168,8 @@ import com.cue.offlinebrain.data.BrainReplyCodec
 import com.cue.offlinebrain.data.ReplyNotificationItem
 import com.cue.offlinebrain.data.brainReplyFromLegacyText
 import com.cue.offlinebrain.notifications.NotificationReplyRegistry
+import com.cue.offlinebrain.notifications.NotificationPrivacyFormatter
+import com.cue.offlinebrain.notifications.PackageLabelResolver
 import com.cue.offlinebrain.data.NoteEntity
 import com.cue.offlinebrain.data.ClipboardEntryEntity
 import com.cue.offlinebrain.data.ClipboardCapturePolicy
@@ -201,6 +207,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.combine
 
@@ -219,11 +226,49 @@ internal fun ChatScreen(feature: ChatViewModel, settings: AppSettings) {
     val macroRecording by vm.macroRecording.collectAsStateWithLifecycle()
     val macroName by vm.recordingMacroName.collectAsStateWithLifecycle()
     val savedNotifications by vm.notificationHistory.collectAsStateWithLifecycle()
-    val readNotificationIds = remember(savedNotifications) { savedNotifications.asSequence().filter { it.isRead }.mapTo(hashSetOf()) { it.id } }
+    val notificationDeleteUndo by vm.notificationDeleteUndo.collectAsStateWithLifecycle()
+    val notificationUnreadState = remember(savedNotifications) { savedNotifications.associate { it.id to it.isUnread } }
     var input by rememberSaveable { mutableStateOf("") }
     var notice by rememberSaveable { mutableStateOf<String?>(null) }
+    var cancelledDeleteCards by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var cancelledReplyCards by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var completedDeleteCards by remember { mutableStateOf<Set<Long>>(emptySet()) }
+    var completedReplyCards by remember { mutableStateOf<Set<Long>>(emptySet()) }
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
+    var notificationSpeechJob by remember { mutableStateOf<Job?>(null) }
+    var speakingNotifications by remember { mutableStateOf(false) }
+    var lastObservedMessageId by remember { mutableStateOf(0L) }
+    fun startNotificationSpeech(items: List<ReplyNotificationItem>, revealCode: Boolean = false) {
+        notificationSpeechJob?.cancel()
+        notificationSpeechJob = scope.launch {
+            speakingNotifications = true
+            try {
+                items.take(12).forEach { item ->
+                    val body = if (revealCode) item.text else NotificationPrivacyFormatter.maskOtpCodes(item.text)
+                    val spoken = listOf(item.title, body).filter(String::isNotBlank).joinToString(". ")
+                    if (spoken.isNotBlank()) VoiceSpeechOutput.speakOnce(context, spoken, takeAudioFocus = true)
+                }
+            } finally {
+                speakingNotifications = false
+                notificationSpeechJob = null
+            }
+        }
+    }
+    fun stopNotificationSpeech() {
+        notificationSpeechJob?.cancel()
+        notificationSpeechJob = null
+        speakingNotifications = false
+    }
+    LaunchedEffect(messages) {
+        val latest = messages.maxOfOrNull { it.id } ?: return@LaunchedEffect
+        if (lastObservedMessageId != 0L && latest > lastObservedMessageId) {
+            val newMessage = messages.firstOrNull { it.id == latest }
+            val card = newMessage?.let { BrainReplyCodec.decode(it.replyJson) as? BrainReply.NotificationList }
+            if (newMessage?.role == "assistant" && card?.readAloudRequested == true) startNotificationSpeech(card.items)
+        }
+        if (latest > lastObservedMessageId) lastObservedMessageId = latest
+    }
     val hostView = LocalView.current
     var androidVoiceSeconds by rememberSaveable { mutableStateOf(12) }
     var pendingFlashCommand by rememberSaveable { mutableStateOf<String?>(null) }
@@ -431,7 +476,7 @@ internal fun ChatScreen(feature: ChatViewModel, settings: AppSettings) {
                         BrainReplyCodec.decode(message.replyJson) ?: brainReplyFromLegacyText(message.text)
                     } else null
                     val typedReply = if (decodedReply is BrainReply.NotificationList) {
-                        decodedReply.copy(items = decodedReply.items.map { if (it.id in readNotificationIds) it.copy(isRead = true) else it })
+                        decodedReply.copy(items = decodedReply.items.map { row -> notificationUnreadState[row.id]?.let { row.copy(isUnread = it) } ?: row })
                     } else decodedReply
                     val transferableText = ResumeEvidenceMarkup.plain(typedReply?.plainText ?: message.text)
                     fun openNotificationApp(item: ReplyNotificationItem, toReply: Boolean) {
@@ -463,20 +508,48 @@ internal fun ChatScreen(feature: ChatViewModel, settings: AppSettings) {
                             } else openNotificationApp(item, toReply = true)
                         },
                         onReadAloud = { item ->
-                            val spoken = listOf(item.title, item.text).filter(String::isNotBlank).joinToString(". ")
-                            if (spoken.isBlank()) notice = "There is no saved notification text to read aloud."
-                            else scope.launch { VoiceSpeechOutput.speakOnce(context, spoken) }
+                            startNotificationSpeech(listOf(item))
+                        },
+                        onReadAll = { items -> startNotificationSpeech(items) },
+                        onStopReadAloud = ::stopNotificationSpeech,
+                        speakingNotifications = speakingNotifications,
+                        onReadCode = { item ->
+                            startNotificationSpeech(listOf(item), revealCode = true)
                         },
                         onCopyNotification = { item ->
                             val copied = listOf(item.title, item.text).filter(String::isNotBlank).joinToString("\n")
                             copyChatText(context, "Saved notification", copied, onResult = { notice = it })
                         },
-                        onMarkRead = vm::markNotificationRead
+                        onMarkRead = vm::markNotificationRead,
+                        onMarkUnread = vm::markNotificationUnread,
+                        deleteCardCancelled = message.id in cancelledDeleteCards,
+                        replyCardCancelled = message.id in cancelledReplyCards,
+                        deleteCardCompleted = message.id in completedDeleteCards,
+                        replyCardCompleted = message.id in completedReplyCards,
+                        onDeleteConfirmed = { card ->
+                            if (card.ids.isEmpty()) notice = "There are no matching saved notifications to delete."
+                            else { vm.softDeleteNotifications(card.ids); completedDeleteCards = completedDeleteCards + message.id }
+                        },
+                        onDeleteCancelled = { cancelledDeleteCards = cancelledDeleteCards + message.id },
+                        onReplyConfirmed = { card, replyText ->
+                            val sent = NotificationReplyRegistry.reply(context, card.packageName, card.postedAt, replyText)
+                            notice = if (sent) "Reply sent via the notification's active reply action." else "That notification's reply action expired or is unavailable."
+                            if (sent) completedReplyCards = completedReplyCards + message.id
+                        },
+                        onReplyCancelled = { cancelledReplyCards = cancelledReplyCards + message.id }
                     )
                 }
                 if (working) item(key = "typing") { MessageTypingBubble() }
             }
             notice?.let { Card(Modifier.fillMaxWidth().padding(horizontal = 14.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF302A3A))) { Text(it, Modifier.padding(12.dp), fontSize = 13.sp) } }
+            notificationDeleteUndo?.let { undo ->
+                Card(Modifier.fillMaxWidth().padding(horizontal = 14.dp), colors = CardDefaults.cardColors(containerColor = Color(0xFF302A3A))) {
+                    Row(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+                        Text("${undo.ids.size} saved notification(s) deleted", Modifier.weight(1f), fontSize = 13.sp)
+                        TextButton(onClick = vm::undoNotificationDelete) { Text("Undo") }
+                    }
+                }
+            }
         }
     }
     replyTarget?.let { item ->
@@ -532,8 +605,21 @@ private fun MessageBubble(
     onOpenApp: (ReplyNotificationItem) -> Unit,
     onReply: (ReplyNotificationItem) -> Unit,
     onReadAloud: (ReplyNotificationItem) -> Unit,
+    onReadCode: (ReplyNotificationItem) -> Unit,
+    onReadAll: (List<ReplyNotificationItem>) -> Unit,
+    onStopReadAloud: () -> Unit,
+    speakingNotifications: Boolean,
     onCopyNotification: (ReplyNotificationItem) -> Unit,
-    onMarkRead: (Long) -> Unit
+    onMarkRead: (Long) -> Unit,
+    onMarkUnread: (Long) -> Unit,
+    deleteCardCancelled: Boolean,
+    replyCardCancelled: Boolean,
+    deleteCardCompleted: Boolean,
+    replyCardCompleted: Boolean,
+    onDeleteConfirmed: (BrainReply.NotificationDeleteConfirmation) -> Unit,
+    onDeleteCancelled: () -> Unit,
+    onReplyConfirmed: (BrainReply.NotificationReplyConfirmation, String) -> Unit,
+    onReplyCancelled: () -> Unit
 ) {
     val isUser = message.role == "user"
     val marker = "\n--- CLEANED TEXT ---\n"
@@ -543,6 +629,8 @@ private fun MessageBubble(
         is BrainReply.DeviceStatusCard -> reply.title
         is BrainReply.NotificationSummaryCard -> reply.title
         is BrainReply.NotificationList -> reply.title
+        is BrainReply.NotificationDeleteConfirmation -> reply.plainText
+        is BrainReply.NotificationReplyConfirmation -> reply.plainText
         is BrainReply.DocumentSummary -> reply.summary
         is BrainReply.Text -> reply.text
         null -> if (isDocument) message.text.substringBefore(marker) else message.text
@@ -561,8 +649,11 @@ private fun MessageBubble(
                     is BrainReply.DeviceStatusCard -> DeviceStatusCardContent(reply, fontScale)
                     is BrainReply.NotificationSummaryCard -> NotificationSummaryCardContent(reply)
                     is BrainReply.NotificationList -> NotificationListCardContent(
-                        reply, onOpenApp, onReply, onReadAloud, onCopyNotification, onMarkRead
+                        reply, onOpenApp, onReply, onReadAloud, onReadCode, onReadAll, onStopReadAloud,
+                        speakingNotifications, onCopyNotification, onMarkRead, onMarkUnread
                     )
+                    is BrainReply.NotificationDeleteConfirmation -> NotificationDeleteConfirmationCard(reply, deleteCardCancelled, deleteCardCompleted, onDeleteConfirmed, onDeleteCancelled)
+                    is BrainReply.NotificationReplyConfirmation -> NotificationReplyConfirmationCard(reply, message.id, replyCardCancelled, replyCardCompleted, onReplyConfirmed, onReplyCancelled)
                     else -> SelectionContainer { Text(annotatedVisibleText, fontSize = (14f * fontScale / 100f).sp, lineHeight = (20f * fontScale / 100f).sp) }
                 }
                 if (isDocument) {
@@ -620,18 +711,75 @@ private fun NotificationSummaryCardContent(reply: BrainReply.NotificationSummary
 }
 
 @Composable
+private fun NotificationDeleteConfirmationCard(
+    reply: BrainReply.NotificationDeleteConfirmation,
+    cancelled: Boolean,
+    completed: Boolean,
+    onConfirm: (BrainReply.NotificationDeleteConfirmation) -> Unit,
+    onCancel: () -> Unit
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text("Delete saved notifications?", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Teal)
+        Text("${reply.ids.size} selected${if (reply.totalCount > reply.ids.size) " of ${reply.totalCount} matching" else ""}${reply.category?.let { " · $it" }.orEmpty()} · ${reply.range}", fontSize = 13.sp)
+        if (reply.ids.isNotEmpty()) Text("They will be hidden now and permanently removed after 10 seconds. You can undo during that time.", color = Muted, fontSize = 12.sp)
+        if (cancelled) Text("Cancelled. Nothing was deleted.", color = Muted, fontSize = 13.sp)
+        else if (completed) Text("Deletion started. Use Undo below if you changed your mind.", color = Muted, fontSize = 13.sp)
+        else Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            TextButton(enabled = reply.ids.isNotEmpty(), onClick = { onConfirm(reply) }) { Text("Delete saved") }
+            TextButton(onClick = onCancel) { Text("Cancel") }
+        }
+    }
+}
+
+@Composable
+private fun NotificationReplyConfirmationCard(
+    reply: BrainReply.NotificationReplyConfirmation,
+    messageId: Long,
+    cancelled: Boolean,
+    completed: Boolean,
+    onSend: (BrainReply.NotificationReplyConfirmation, String) -> Unit,
+    onCancel: () -> Unit
+) {
+    var draft by rememberSaveable(messageId) { mutableStateOf(reply.text.take(2000)) }
+    val canReply = remember(reply.packageName, reply.postedAt) { NotificationReplyRegistry.canReply(reply.packageName, reply.postedAt) }
+    Column(verticalArrangement = Arrangement.spacedBy(7.dp)) {
+        Text("Confirm reply", fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Teal)
+        Text("To: ${reply.target}", fontSize = 13.sp)
+        if (cancelled) Text("Cancelled. No reply was sent.", color = Muted, fontSize = 13.sp)
+        else if (completed) Text("Reply submitted to Android's active notification action.", color = Muted, fontSize = 13.sp)
+        else {
+            OutlinedTextField(draft, { draft = it.take(2000) }, Modifier.fillMaxWidth(), label = { Text("Reply text") }, maxLines = 4, enabled = canReply)
+            if (!canReply) Text("The notification's inline reply action expired. Open the app to reply.", color = Muted, fontSize = 12.sp)
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                TextButton(enabled = canReply && draft.isNotBlank(), onClick = { onSend(reply, draft) }) { Text("Send reply") }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
+        }
+    }
+}
+
+@Composable
 private fun NotificationListCardContent(
     reply: BrainReply.NotificationList,
     onOpenApp: (ReplyNotificationItem) -> Unit,
     onReply: (ReplyNotificationItem) -> Unit,
     onReadAloud: (ReplyNotificationItem) -> Unit,
+    onReadCode: (ReplyNotificationItem) -> Unit,
+    onReadAll: (List<ReplyNotificationItem>) -> Unit,
+    onStopReadAloud: () -> Unit,
+    speakingNotifications: Boolean,
     onCopy: (ReplyNotificationItem) -> Unit,
-    onMarkRead: (Long) -> Unit
+    onMarkRead: (Long) -> Unit,
+    onMarkUnread: (Long) -> Unit
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(reply.title, fontSize = 16.sp, fontWeight = FontWeight.SemiBold, color = Teal)
         Text("${reply.totalCount} saved · ${reply.unreadCount} unread", fontSize = 13.sp, color = Muted)
-        reply.items.forEach { item -> NotificationItemCard(item, onOpenApp, onReply, onReadAloud, onCopy, onMarkRead) }
+        if (speakingNotifications) TextButton(onClick = onStopReadAloud) { Text("Stop reading") }
+        else if (reply.items.isNotEmpty()) TextButton(onClick = { onReadAll(reply.items) }) { Text("Read all aloud") }
+        reply.items.forEach { item ->
+            NotificationItemCard(item, onOpenApp, onReply, onReadAloud, onReadCode, onCopy, onMarkRead, onMarkUnread)
+        }
         reply.note?.takeIf(String::isNotBlank)?.let { Text(it, fontSize = 12.sp, color = Muted) }
     }
 }
@@ -642,22 +790,49 @@ private fun NotificationItemCard(
     onOpenApp: (ReplyNotificationItem) -> Unit,
     onReply: (ReplyNotificationItem) -> Unit,
     onReadAloud: (ReplyNotificationItem) -> Unit,
+    onReadCode: (ReplyNotificationItem) -> Unit,
     onCopy: (ReplyNotificationItem) -> Unit,
-    onMarkRead: (Long) -> Unit
+    onMarkRead: (Long) -> Unit,
+    onMarkUnread: (Long) -> Unit
 ) {
-    var markedRead by rememberSaveable(item.id, item.isRead) { mutableStateOf(item.isRead) }
+    val context = LocalContext.current
+    var showText by rememberSaveable(item.id) { mutableStateOf(false) }
+    val appLabel = remember(item.packageName) { PackageLabelResolver.label(context, item.packageName) }
+    val appIcon = remember(item.packageName) { PackageLabelResolver.icon(context, item.packageName)?.toBitmap(48, 48)?.asImageBitmap() }
+    val privateCategory = item.category == "Calls" || item.category == "Messages/SMS" || item.category == "Messages (SMS)"
+    val canReply = remember(item.packageName, item.postedAt) { NotificationReplyRegistry.canReply(item.packageName, item.postedAt) }
+    LaunchedEffect(item.id, item.isUnread) { if (item.isUnread) onMarkRead(item.id) }
+    val safeText = when {
+        privateCategory && !showText -> NotificationPrivacyFormatter.line(item.category, item.title, item.text)
+        item.category == "Messages/SMS" || item.category == "Messages (SMS)" -> NotificationPrivacyFormatter.line(item.category, item.title, item.text, includeMessageBody = true)
+        else -> NotificationPrivacyFormatter.line(item.category, item.title, item.text)
+    }
+    val safeCopy = if (privateCategory && !showText) item.copy(text = "") else item
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF242538)), shape = RoundedCornerShape(14.dp)) {
         Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text(item.title + if (item.duplicateCount > 1) " x${item.duplicateCount}" else "", fontWeight = FontWeight.SemiBold)
-            Text("${item.category} · ${DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(Date(item.postedAt))}", color = Muted, fontSize = 11.sp)
-            if (item.groupName.isNotBlank()) Text(item.groupName, color = Muted, fontSize = 12.sp)
-            if (item.text.isNotBlank()) SelectionContainer { Text(item.text, fontSize = 13.sp, lineHeight = 18.sp) }
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (appIcon != null) Image(appIcon, contentDescription = "$appLabel app icon", modifier = Modifier.size(32.dp))
+                else Icon(Icons.Filled.Notifications, contentDescription = "$appLabel notification", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(28.dp))
+                Column(Modifier.weight(1f)) {
+                    Text(appLabel, fontWeight = FontWeight.Medium, fontSize = 12.sp, color = Muted)
+                    Text(item.title.ifBlank { "Notification" }, fontWeight = FontWeight.SemiBold)
+                }
+                if (item.isUnread) Text("●", color = MaterialTheme.colorScheme.primary, fontSize = 11.sp)
+            }
+            if (item.category == "Chat" && item.groupName.isNotBlank()) Text("Chat · ${item.groupName}", color = Muted, fontSize = 12.sp)
+            if (safeText.isNotBlank()) Text(safeText, fontSize = 13.sp, lineHeight = 18.sp)
+            if (privateCategory && item.text.isNotBlank()) {
+                TextButton(onClick = { showText = !showText }) { Text(if (showText) "Hide text" else "Show text") }
+            }
+            if (item.duplicateCount > 1) Text("x${item.duplicateCount} repeats", color = Muted, fontSize = 11.sp)
+            Text("${item.category} · ${DateUtils.getRelativeTimeSpanString(item.postedAt, System.currentTimeMillis(), DateUtils.MINUTE_IN_MILLIS)}", color = Muted, fontSize = 11.sp)
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 TextButton(onClick = { onOpenApp(item) }) { Text("Open app") }
-                TextButton(onClick = { onReply(item) }) { Text("Reply") }
+                if (canReply) TextButton(onClick = { onReply(item) }) { Text("Reply") }
                 TextButton(onClick = { onReadAloud(item) }) { Text("Read aloud") }
-                TextButton(onClick = { onCopy(item) }) { Text("Copy") }
-                TextButton(onClick = { onMarkRead(item.id); markedRead = true }, enabled = !markedRead) { Text(if (markedRead) "Read" else "Mark read") }
+                if (NotificationPrivacyFormatter.containsOtpCode(item.text)) TextButton(onClick = { onReadCode(item) }) { Text("Read code") }
+                TextButton(onClick = { onCopy(safeCopy) }) { Text("Copy") }
+                if (!item.isUnread) TextButton(onClick = { onMarkUnread(item.id) }) { Text("Mark unread") }
             }
         }
     }

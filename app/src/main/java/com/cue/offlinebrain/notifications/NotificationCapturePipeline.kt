@@ -13,6 +13,11 @@ import androidx.core.app.NotificationManagerCompat
 import com.cue.offlinebrain.OfflineBrainApplication
 import com.cue.offlinebrain.data.AppSettings
 import com.cue.offlinebrain.data.NotificationEntity
+import com.cue.offlinebrain.data.BrainReply
+import com.cue.offlinebrain.data.BrainReplyCodec
+import com.cue.offlinebrain.data.MessageEntity
+import com.cue.offlinebrain.data.ReplyCategoryCount
+import com.cue.offlinebrain.data.ReplyNotificationItem
 import com.cue.offlinebrain.data.shouldStoreNotification
 import com.cue.offlinebrain.diagnostics.CrashLog
 import kotlinx.coroutines.CompletableDeferred
@@ -353,7 +358,7 @@ object NotificationCapturePipeline {
                 )
                 val action = notification.actions?.firstOrNull { it.remoteInputs?.isNotEmpty() == true && it.actionIntent != null }
                 val groupName = extracted.groupName.ifBlank { if (isGroupSummary) sbn.groupKey.orEmpty() else "" }
-                val inserted = NotificationSavePath.save(
+                val insertedId = NotificationSavePath.save(
                     app.database.dao(),
                     NotificationEntity(
                         packageName = pkg,
@@ -368,12 +373,45 @@ object NotificationCapturePipeline {
                     ),
                     settings.notificationRetentionDays
                 )
+                val inserted = insertedId > 0L
                 val reason = NotificationCapturePolicy.reasonForStoreResult(inserted)
                 if (inserted) {
                     if (ongoing) NotificationRuntimeGuards.ongoing.markSaved(key, limiterNow)
                     context.getSharedPreferences("notification_capture_state", Context.MODE_PRIVATE).edit()
                         .putLong("last_saved_at", System.currentTimeMillis()).apply()
                     NotificationReplyRegistry.register(pkg, sbn.postTime, action?.actionIntent, action?.remoteInputs)
+                    if (!isTestCapture) {
+                        val mutedApp = settings.notificationMutedPackages.lines().any { line ->
+                            val muted = line.trim().lowercase(Locale.ROOT)
+                            muted.isNotBlank() && (pkg.lowercase(Locale.ROOT) == muted || pkg.lowercase(Locale.ROOT).startsWith("$muted."))
+                        }
+                        val mutedCategory = settings.notificationMutedCategories.lines().any { it.trim().equals(resolvedCategory, true) }
+                        if (NotificationAlertPolicy.shouldPublish(mutedApp, mutedCategory, ongoing, hasMediaMetadata)) {
+                            if (settings.notificationInAppAlertsEnabled || settings.notificationSpeakNewEnabled) {
+                                NotificationAlertQueue.enqueue(NotificationAlert(
+                                    id = "$pkg:${sbn.postTime}", packageName = pkg, title = title, text = body,
+                                    category = resolvedCategory, groupName = groupName, postedAt = sbn.postTime
+                                ))
+                            }
+                            if (settings.notificationChatAlertsEnabled) {
+                                val appLabel = PackageLabelResolver.label(context, pkg)
+                                val reply = BrainReply.NotificationList(
+                                    title = "New: $appLabel — ${title.ifBlank { "Notification" }}", category = resolvedCategory,
+                                    totalCount = 1, unreadCount = 1, latestAt = sbn.postTime,
+                                    categoryCounts = listOf(ReplyCategoryCount(resolvedCategory, 1)),
+                                    items = listOf(ReplyNotificationItem(
+                                        id = insertedId, packageName = pkg, title = title.ifBlank { appLabel }, text = body,
+                                        category = resolvedCategory, postedAt = sbn.postTime, groupName = groupName,
+                                        isUnread = true
+                                    )),
+                                    note = "New item captured just now."
+                                )
+                                app.database.dao().addMessage(MessageEntity(
+                                    role = "assistant", text = reply.plainText, replyJson = BrainReplyCodec.encode(reply)
+                                ))
+                            }
+                        }
+                    }
                 } else NotificationReplyRegistry.remove(pkg, sbn.postTime)
                 record(NotificationPipelineDecision(pkg, reason, resolvedCategory, rawCategory, flags, source), testToken, key)
             } catch (cancelled: CancellationException) {

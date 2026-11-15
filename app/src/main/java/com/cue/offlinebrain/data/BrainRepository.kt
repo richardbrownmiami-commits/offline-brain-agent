@@ -24,8 +24,8 @@ import com.cue.offlinebrain.notifications.BrainNotificationListener
 import com.cue.offlinebrain.notifications.NotificationAccessState
 import com.cue.offlinebrain.notifications.NotificationPrivacyFormatter
 import com.cue.offlinebrain.notifications.NotificationQueryParser
-import com.cue.offlinebrain.notifications.NotificationLastSeenStore
 import com.cue.offlinebrain.notifications.PackageLabelResolver
+import com.cue.offlinebrain.notifications.NotificationReplyRegistry
 import com.cue.offlinebrain.summary.DocumentSummary
 import com.cue.offlinebrain.summary.ExtractiveSummarizer
 import com.cue.offlinebrain.summary.DocumentKind
@@ -59,14 +59,16 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
     )
     private val commandCandidate = Regex("(?i)^\\s*(?:open|launch|start|search|find|look\\s+for|type|write|tap|click|press|scroll|go\\s+back|go\\s+home|go\\s+to|back|home|call|play|send)\\b")
 
-    private enum class NotificationFollowUpKind { WHY, MORE, DETAILS, AGAIN }
+    private enum class NotificationFollowUpKind { WHY, MORE, DETAILS, AGAIN, READ_IT, REPLY_TO_LAST, MARK_THAT_UNREAD, DELETE_THOSE }
 
     private data class NotificationFollowUpContext(
         val query: NotificationQueryParser.Query,
         val category: String?,
         val resultCount: Int,
         val latestAt: Long?,
-        val appName: String?
+        val appName: String?,
+        val resultIds: List<Long> = emptyList(),
+        val latestNotificationId: Long? = null
     )
 
     suspend fun seedFaqs() {
@@ -87,14 +89,35 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         val previous = lastNotificationContext
         if (followUp != null && previous != null) {
             if (followUp == NotificationFollowUpKind.WHY) return BrainReply.Text(explainPreviousNotificationAnswer(previous))
+            if (followUp == NotificationFollowUpKind.MARK_THAT_UNREAD) {
+                val id = previous.latestNotificationId ?: return BrainReply.Text("There is no notification in the last result to mark unread.")
+                db.dao().markNotificationUnread(id)
+                return BrainReply.Text("Marked that notification unread.")
+            }
+            if (followUp == NotificationFollowUpKind.DELETE_THOSE) {
+                if (previous.resultIds.isEmpty()) return BrainReply.Text("There are no saved notifications in the last result to delete.")
+                val now = System.currentTimeMillis()
+                return BrainReply.NotificationDeleteConfirmation(previous.resultIds.take(500), previous.category, "the previous results", now, previous.resultIds.size)
+            }
+            if (followUp == NotificationFollowUpKind.REPLY_TO_LAST) {
+                val row = previous.latestNotificationId?.let { db.dao().notificationById(it) }
+                    ?: return BrainReply.Text("There is no notification in the last result to reply to.")
+                if (!NotificationReplyRegistry.canReply(row.packageName, row.postedAt)) return BrainReply.Text("That notification's inline reply action is no longer available. Open the app and reply there.")
+                val target = row.title.ifBlank { PackageLabelResolver.label(context, row.packageName) }
+                val replyText = Regex("^reply to (?:him|her|them|that)(?: notification)?(?:\\s*:\\s*(.*))?$", RegexOption.IGNORE_CASE)
+                    .matchEntire(normalized)?.groupValues?.getOrNull(1).orEmpty()
+                return BrainReply.NotificationReplyConfirmation(row.id, row.packageName, row.postedAt, target, replyText)
+            }
             val repeatedQuery = when (followUp) {
                 NotificationFollowUpKind.AGAIN -> previous.query
+                NotificationFollowUpKind.READ_IT -> previous.query.copy(action = NotificationQueryParser.Action.READ, notificationId = previous.latestNotificationId)
                 NotificationFollowUpKind.MORE, NotificationFollowUpKind.DETAILS -> previous.query.copy(
                     action = if (previous.query.action == NotificationQueryParser.Action.READ ||
                         previous.query.action == NotificationQueryParser.Action.TELL || !previous.query.contact.isNullOrBlank())
                         previous.query.action else NotificationQueryParser.Action.LIST
                 )
-                NotificationFollowUpKind.WHY -> previous.query
+                NotificationFollowUpKind.WHY, NotificationFollowUpKind.REPLY_TO_LAST,
+                NotificationFollowUpKind.MARK_THAT_UNREAD, NotificationFollowUpKind.DELETE_THOSE -> previous.query
             }
             return handleNotificationQuestion(normalized, NotificationQueryParser.Outcome.Parsed(repeatedQuery))
         }
@@ -385,14 +408,51 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
     }
 
     private suspend fun handleNotificationQuestion(text: String, outcome: NotificationQueryParser.Outcome): BrainReply {
-        val permission = notificationPermissionStatus()
-        if (permission == false) CrashLog.record("NOTIFICATIONS", "query requested while listener is enabled but not connected; using saved database rows")
         val query = when (outcome) {
             is NotificationQueryParser.Outcome.Parsed -> outcome.query
             is NotificationQueryParser.Outcome.Clarify -> return BrainReply.Text("I found more than one possible notification meaning (${outcome.candidates.sorted().joinToString(", ")}). Try naming one category, such as SMS, Chat, Calls, or Social.")
-            is NotificationQueryParser.Outcome.Rejected -> return BrainReply.Text("I couldn't safely understand that notification request (${outcome.reason}). Try “show SMS notifications”, “read system notifications”, or “any new notifications”.")
+            is NotificationQueryParser.Outcome.Rejected -> return BrainReply.Text("I couldn't safely understand that notification request (${outcome.reason}). Try ‘show SMS notifications’, ‘read system notifications’, or ‘any new notifications’.")
         }
+        val prefs = settings.settings.first()
+        if (prefs.notificationLiveCaptureEnabled && NotificationAccessState.enabled(context) && !NotificationAccessState.connected) {
+            val reconnected = NotificationAccessState.ensureConnected(context, "chat-notification-query")
+            if (!reconnected) CrashLog.record("NOTIFICATIONS", "chat query rebind wait expired; querying saved rows")
+        }
+        val permission = notificationPermissionStatus()
+        if (permission == false) CrashLog.record("NOTIFICATIONS", "query requested while listener is enabled but not connected; using saved database rows")
         val category = query.category?.let(::notificationCategoryName)
+
+        if (query.action == NotificationQueryParser.Action.MARK_UNREAD) {
+            if (category == null) db.dao().markAllNotificationsUnread() else db.dao().markCategoryNotificationsUnread(category)
+            return BrainReply.Text(if (category == null) "Marked all saved notifications unread." else "Marked all $category notifications unread.")
+        }
+
+        if (query.action == NotificationQueryParser.Action.REPLY) {
+            val target = query.contact.orEmpty()
+            val byId = query.notificationId?.let { db.dao().notificationById(it) }
+            val packageMatches = db.dao().notificationPackageCounts().filter { row ->
+                PackageLabelResolver.label(context, row.packageName).equals(target, true) ||
+                    row.packageName.equals(target, true) || row.packageName.substringAfterLast('.').equals(target, true)
+            }.flatMap { db.dao().notificationsFromPackage(it.packageName) }
+            val candidates = (listOfNotNull(byId) + db.dao().searchNotifications(target) + packageMatches)
+                .distinctBy { it.id }
+                .filter { row -> row.title.contains(target, true) || row.text.contains(target, true) ||
+                    row.packageName.contains(target, true) || PackageLabelResolver.label(context, row.packageName).contains(target, true) }
+                .filter { NotificationReplyRegistry.canReply(it.packageName, it.postedAt) }
+            val row = candidates.maxByOrNull { it.postedAt }
+                ?: return BrainReply.Text("I couldn't find a recent saved notification from ‘$target’ with an active inline reply action. Open the app and reply there.")
+            val display = row.title.ifBlank { PackageLabelResolver.label(context, row.packageName) }
+            return BrainReply.NotificationReplyConfirmation(row.id, row.packageName, row.postedAt, display, query.replyText.orEmpty())
+        }
+
+        if (query.action == NotificationQueryParser.Action.DELETE || query.action == NotificationQueryParser.Action.CLEAR) {
+            db.dao().purgeSoftDeletedNotifications(System.currentTimeMillis() - 10_000L)
+            val bounds = notificationDeleteBounds(query, System.currentTimeMillis())
+            val candidates = db.dao().notificationsForDelete(category.orEmpty(), bounds.first, bounds.second)
+            val count = db.dao().countNotificationsForDelete(category.orEmpty(), bounds.first, bounds.second)
+            return BrainReply.NotificationDeleteConfirmation(candidates.map { it.id }, category, bounds.third, System.currentTimeMillis(), count)
+        }
+
         val appRows = if (query.fromApp.isNullOrBlank()) emptyList() else db.dao().notificationPackageCounts()
         val appMatches = if (query.fromApp.isNullOrBlank()) emptyList() else appRows.filter { row ->
             val label = PackageLabelResolver.label(context, row.packageName)
@@ -401,40 +461,48 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         }
         if (query.fromApp != null && appMatches.size > 1) {
             val labels = appMatches.take(5).joinToString(", ") { PackageLabelResolver.label(context, it.packageName) }
-            return BrainReply.Text("I found more than one app matching “${query.fromApp}”: $labels. Please use the full app name.")
+            return BrainReply.Text("I found more than one app matching ‘${query.fromApp}’: $labels. Please use the full app name.")
         }
         val targetPackage = appMatches.singleOrNull()?.packageName
-        val sinceSeen = if (query.unreadOnly) NotificationLastSeenStore.lastSeen(context, category) else 0L
-        val todayStart = if (query.todayOnly) java.util.Calendar.getInstance().apply {
+        val calendar = java.util.Calendar.getInstance()
+        val todayStart = if (query.todayOnly) calendar.clone().let { it as java.util.Calendar }.apply {
             set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
         }.timeInMillis else 0L
-        val since = maxOf(sinceSeen, todayStart)
-        val unread = query.unreadOnly
+        val yesterdayStart = if (query.yesterdayOnly) calendar.clone().let { it as java.util.Calendar }.apply {
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0); set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+            add(java.util.Calendar.DAY_OF_YEAR, -1)
+        }.timeInMillis else 0L
+        val since = if (query.yesterdayOnly) yesterdayStart else todayStart
+        val endBefore = if (query.yesterdayOnly) todayStart else 0L
         val selectedRows = when {
-            query.fromApp != null && targetPackage != null -> db.dao().notificationsFromPackageFiltered(targetPackage, since, unread)
+            query.notificationId != null -> listOfNotNull(db.dao().notificationById(query.notificationId))
+            query.fromApp != null && targetPackage != null -> db.dao().notificationsFromPackageFiltered(targetPackage, since, query.unreadOnly)
             query.fromApp != null -> emptyList()
-            category != null -> db.dao().notificationsByCategoryFiltered(category, since, unread)
-            !query.contact.isNullOrBlank() -> db.dao().searchNotificationsFiltered(query.contact, since, unread)
-            else -> db.dao().recentNotificationsFiltered(since, unread)
+            category != null -> db.dao().notificationsByCategoryFiltered(category, since, query.unreadOnly)
+            !query.contact.isNullOrBlank() -> db.dao().searchNotificationsFiltered(query.contact, since, query.unreadOnly)
+            else -> db.dao().recentNotificationsFiltered(since, query.unreadOnly)
         }
+        val missedOnly = Regex("\\bmissed\\b", RegexOption.IGNORE_CASE).containsMatchIn(text)
+        val callPackages = setOf("com.android.server.telecom", "com.android.phone", "com.android.incallui", "com.android.dialer", "com.google.android.dialer")
         val found = selectedRows.filter { row ->
             (targetPackage == null || row.packageName == targetPackage) &&
-                (query.contact.isNullOrBlank() || row.title.contains(query.contact, true) || row.text.contains(query.contact, true))
+                (!missedOnly || query.category != NotificationQueryParser.Category.CALLS ||
+                    Regex("missed|unanswered", RegexOption.IGNORE_CASE).containsMatchIn("${row.title} ${row.text}") || row.packageName.lowercase(Locale.ROOT) in callPackages) &&
+                (query.contact.isNullOrBlank() || row.title.contains(query.contact, true) || row.text.contains(query.contact, true)) &&
+                (endBefore == 0L || row.postedAt < endBefore)
         }
-        NotificationLastSeenStore.markSeen(context, category, System.currentTimeMillis())
+        val readCount = db.dao().readNotificationCount(category.orEmpty())
         val counts = db.dao().notificationCategoryCounts()
         val categoriesAvailable = counts.takeIf { it.isNotEmpty() }?.joinToString(" · ") { "${it.category} ${it.count}" } ?: "none yet"
         val appName = targetPackage?.let { PackageLabelResolver.label(context, it) }
         val empty = when {
+            query.unreadOnly && category != null -> "No unread $category. You have $readCount read ones; say ‘show all ${category.lowercase()}’."
             category != null -> "No $category notifications saved yet. You have: $categoriesAvailable."
-            query.fromApp != null && appName == null -> "I couldn't match “${query.fromApp}” to an app with saved notifications. You have: $categoriesAvailable."
+            query.fromApp != null && appName == null -> "I couldn't match ‘${query.fromApp}’ to an app with saved notifications. You have: $categoriesAvailable."
             appName != null -> "No saved notifications from $appName were found. You have: $categoriesAvailable."
             !query.contact.isNullOrBlank() -> "No saved notifications mentioning ${query.contact} were found. You have: $categoriesAvailable."
             else -> "No saved notifications yet. You have: $categoriesAvailable."
         }
-        val includeMessageBody = query.action == NotificationQueryParser.Action.READ ||
-            query.action == NotificationQueryParser.Action.TELL || !query.contact.isNullOrBlank()
-        val prefs = settings.settings.first()
         val notes = buildList {
             if (found.isEmpty()) add(empty)
             when (permission) {
@@ -452,20 +520,25 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
             else -> "Saved notifications"
         }
         val latestAt = found.maxOfOrNull { it.postedAt }
-        val unreadCount = found.count { !it.isRead }
+        val unreadCount = found.count { it.isUnread }
         val categoryCounts = if (category == null) counts.map { ReplyCategoryCount(it.category, it.count) }
             else found.groupingBy { it.category }.eachCount().map { ReplyCategoryCount(it.key, it.value) }.sortedByDescending { it.count }
                 .ifEmpty { listOf(ReplyCategoryCount(category, 0)) }
-        lastNotificationContext = NotificationFollowUpContext(query, category, found.size, latestAt, appName)
+        lastNotificationContext = NotificationFollowUpContext(query, category, found.size, latestAt, appName,
+            found.map { it.id }, found.maxByOrNull { it.postedAt }?.id)
 
-        if (query.action in setOf(NotificationQueryParser.Action.SHOW, NotificationQueryParser.Action.ANY,
-                NotificationQueryParser.Action.OPEN, NotificationQueryParser.Action.WHAT_IN)) {
-            return BrainReply.NotificationSummaryCard(title, category, found.size, unreadCount, latestAt, categoryCounts, note)
+        val summaryOnly = category == null && query.contact.isNullOrBlank() && query.fromApp.isNullOrBlank() &&
+            query.action in setOf(NotificationQueryParser.Action.ANY, NotificationQueryParser.Action.OPEN, NotificationQueryParser.Action.WHAT_IN)
+        if (summaryOnly) return BrainReply.NotificationSummaryCard(title, category, found.size, unreadCount, latestAt, categoryCounts, note)
+
+        val now = System.currentTimeMillis()
+        val shown = if (found.isEmpty()) emptyList() else {
+            db.dao().markNotificationsRead(found.map { it.id }, now)
+            found.map { if (it.isUnread) it.copy(isUnread = false, readAt = now) else it }
         }
-
-        val grouped = found.groupBy { row ->
+        val grouped = shown.groupBy { row ->
             if (row.category == "Music and media") "media\u0000${row.packageName}\u0000${row.title}"
-            else listOf(row.packageName, row.title, row.text, row.category).joinToString("\u0000")
+            else listOf(row.packageName, row.title, row.text, row.category, row.groupName).joinToString("\u0000")
         }.values.mapNotNull { group -> group.maxByOrNull { it.postedAt }?.let { latest -> latest to group.size } }
             .sortedByDescending { it.first.postedAt }.take(12)
         val items = grouped.map { (row, repeatedCount) ->
@@ -473,15 +546,37 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
                 id = row.id,
                 packageName = row.packageName,
                 title = row.title.ifBlank { PackageLabelResolver.label(context, row.packageName) },
-                text = if (includeMessageBody) row.text else "",
+                text = row.text,
                 category = row.category,
                 postedAt = row.postedAt,
                 groupName = row.groupName,
                 duplicateCount = repeatedCount,
-                isRead = row.isRead
+                isUnread = row.isUnread
             )
         }
-        return BrainReply.NotificationList(title, category, found.size, unreadCount, latestAt, categoryCounts, items, note)
+        return BrainReply.NotificationList(title, category, found.size, unreadCount, latestAt, categoryCounts, items, note,
+            readAloudRequested = query.action == NotificationQueryParser.Action.READ)
+    }
+
+    private fun notificationDeleteBounds(query: NotificationQueryParser.Query, now: Long): Triple<Long, Long, String> {
+        val today = java.util.Calendar.getInstance().apply {
+            timeInMillis = now
+            set(java.util.Calendar.HOUR_OF_DAY, 0); set(java.util.Calendar.MINUTE, 0)
+            set(java.util.Calendar.SECOND, 0); set(java.util.Calendar.MILLISECOND, 0)
+        }
+        val startToday = today.timeInMillis
+        return when {
+            query.todayOnly -> Triple(startToday, 0L, "today")
+            query.yesterdayOnly -> {
+                val yesterday = (today.clone() as java.util.Calendar).apply { add(java.util.Calendar.DAY_OF_YEAR, -1) }
+                Triple(yesterday.timeInMillis, startToday, "yesterday")
+            }
+            query.lastMinutes != null -> Triple(now - query.lastMinutes.coerceAtLeast(1) * 60_000L, 0L, "the last ${query.lastMinutes} minutes")
+            query.lastHours != null -> Triple(now - query.lastHours.coerceAtLeast(1) * 3_600_000L, 0L, "the last ${query.lastHours} hours")
+            query.lastDays != null -> Triple(now - query.lastDays.coerceAtLeast(1) * 86_400_000L, 0L, "the last ${query.lastDays} days")
+            query.olderThanDays != null -> Triple(0L, now - query.olderThanDays.coerceAtLeast(1) * 86_400_000L, "older than ${query.olderThanDays} days")
+            else -> Triple(0L, 0L, "all saved history")
+        }
     }
 
     private fun notificationCategoryName(category: NotificationQueryParser.Category): String = when (category) {
@@ -528,6 +623,10 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
     private fun notificationFollowUpKind(value: String): NotificationFollowUpKind? {
         val normalized = value.lowercase(Locale.ROOT).replace(Regex("[^\\p{L}\\p{N}\\s]"), " ")
             .replace(Regex("\\s+"), " ").trim()
+        if (normalized in setOf("read it", "read that", "read this")) return NotificationFollowUpKind.READ_IT
+        if (normalized in setOf("mark that unread", "mark it unread", "mark this unread")) return NotificationFollowUpKind.MARK_THAT_UNREAD
+        if (normalized in setOf("delete those", "delete them", "clear those", "clear them")) return NotificationFollowUpKind.DELETE_THOSE
+        if (Regex("^reply to (him|her|them|that)( notification)?( .*)?$").matches(normalized)) return NotificationFollowUpKind.REPLY_TO_LAST
         return when (normalized) {
             "why", "why is that", "why did you say that", "explain", "explain that" -> NotificationFollowUpKind.WHY
             "more", "tell me more", "more details" -> NotificationFollowUpKind.MORE
@@ -628,10 +727,13 @@ class BrainRepository(private val context: Context, private val db: BrainDatabas
         val lower = text.lowercase(Locale.ROOT)
         if (Regex("\\bnotifications?\\b").containsMatchIn(lower)) return true
         if (commandCandidate.containsMatchIn(text)) return false
-        val hasAction = Regex("(?i)\\b(show|sho|read|tell|list|what|any|open|new|unread|latest)\\b").containsMatchIn(text)
+        val hasAction = Regex("(?i)\\b(show|sho|read|tell|list|what|any|open|new|unread|latest|delete|clear|mark|reply|check)\\b").containsMatchIn(text)
         val hasCategory = Regex("(?i)\\b(text|texts|sms|message|messages|chat|whatsapp|telegram|call|calls|missed|system|android|phone|music|media|youtube|social|email|weather|shopping|food|games|finance)\\b").containsMatchIn(text)
         return when (outcome) {
-            is NotificationQueryParser.Outcome.Parsed -> outcome.query.contact != null || (hasAction && hasCategory)
+            is NotificationQueryParser.Outcome.Parsed -> outcome.query.action in setOf(
+                NotificationQueryParser.Action.MARK_UNREAD, NotificationQueryParser.Action.DELETE,
+                NotificationQueryParser.Action.CLEAR, NotificationQueryParser.Action.REPLY
+            ) || outcome.query.contact != null || (hasAction && hasCategory)
             is NotificationQueryParser.Outcome.Clarify -> hasAction && hasCategory
             is NotificationQueryParser.Outcome.Rejected -> hasAction && hasCategory
         }

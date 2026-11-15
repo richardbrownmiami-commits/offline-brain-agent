@@ -590,12 +590,7 @@ class DiagnosticsRunner(context: Context) {
         val liveCapture = (appContext as? OfflineBrainApplication)?.settings?.settings?.first()?.notificationLiveCaptureEnabled ?: false
         if (!enabled) return "FAIL — Notification Access is off; live capture is ${if (liveCapture) "on" else "off"}. Enable access in Android's Notification access settings."
         if (NotificationAccessState.connected) return "PASS — notification listener is connected; live capture is ${if (liveCapture) "on" else "off"}."
-        NotificationAccessState.repair(appContext)
-        repeat(10) {
-            delay(500)
-            if (NotificationAccessState.connected) return "PASS — notification listener reconnected; live capture is ${if (liveCapture) "on" else "off"}."
-        }
-        return "FAIL — Notification Access is enabled but Android has not connected the listener; inspect MIUI background settings and retry."
+        return "FAIL — Notification Access is enabled but the listener is disconnected; automatic repair is disabled. Use the user-tapped connection test in Notification settings."
     }
 
     private suspend fun screenshotCapability(): String = suspendCancellableCoroutine { continuation ->

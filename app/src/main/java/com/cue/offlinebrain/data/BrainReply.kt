@@ -63,7 +63,8 @@ sealed interface BrainReply {
         val latestAt: Long?,
         val categoryCounts: List<ReplyCategoryCount>,
         val items: List<ReplyNotificationItem>,
-        val note: String? = null
+        val note: String? = null,
+        val readAloudRequested: Boolean = false
     ) : BrainReply {
         override val plainText: String get() = buildString {
             append(title).append(" (").append(totalCount).append(")")
@@ -71,11 +72,31 @@ sealed interface BrainReply {
             items.forEach { item ->
                 append('\n').append("• ").append(item.title.ifBlank { item.packageName.substringAfterLast('.') })
                 if (item.duplicateCount > 1) append(" x").append(item.duplicateCount)
-                if (item.text.isNotBlank()) append(" — ").append(item.text)
+                if (item.text.isNotBlank() && item.category !in setOf("Calls", "Messages/SMS", "Messages (SMS)")) append(" — ").append(item.text)
                 append(" · ").append(formatReplyTime(item.postedAt))
             }
             note?.takeIf(String::isNotBlank)?.let { append("\n\n").append(it) }
         }
+    }
+
+    data class NotificationDeleteConfirmation(
+        val ids: List<Long>,
+        val category: String?,
+        val range: String,
+        val createdAt: Long,
+        val totalCount: Int = ids.size
+    ) : BrainReply {
+        override val plainText: String get() = "Delete ${ids.size} saved notification${if (ids.size == 1) "" else "s"}${if (totalCount > ids.size) " (of $totalCount matching)" else ""}${category?.let { " in $it" }.orEmpty()} from $range?"
+    }
+
+    data class NotificationReplyConfirmation(
+        val notificationId: Long,
+        val packageName: String,
+        val postedAt: Long,
+        val target: String,
+        val text: String
+    ) : BrainReply {
+        override val plainText: String get() = "Reply to $target: $text"
     }
 
     data class DocumentSummary(
@@ -99,7 +120,7 @@ data class ReplyNotificationItem(
     val postedAt: Long,
     val groupName: String = "",
     val duplicateCount: Int = 1,
-    val isRead: Boolean = false
+    val isUnread: Boolean = true
 )
 
 fun brainReplyFromLegacyText(value: String, sourceName: String? = null): BrainReply {
@@ -149,6 +170,23 @@ object BrainReplyCodec {
                 put("categoryCounts", categoryCountsJson(reply.categoryCounts))
                 put("items", buildJsonArray { reply.items.forEach { add(notificationItemJson(it)) } })
                 put("note", reply.note?.let(::JsonPrimitive) ?: JsonNull)
+                put("readAloudRequested", JsonPrimitive(reply.readAloudRequested))
+            }
+            is BrainReply.NotificationDeleteConfirmation -> {
+                put("type", JsonPrimitive("notification_delete_confirmation"))
+                put("ids", buildJsonArray { reply.ids.forEach { add(JsonPrimitive(it)) } })
+                put("category", reply.category?.let(::JsonPrimitive) ?: JsonNull)
+                put("range", JsonPrimitive(reply.range))
+                put("createdAt", JsonPrimitive(reply.createdAt))
+                put("totalCount", JsonPrimitive(reply.totalCount))
+            }
+            is BrainReply.NotificationReplyConfirmation -> {
+                put("type", JsonPrimitive("notification_reply_confirmation"))
+                put("notificationId", JsonPrimitive(reply.notificationId))
+                put("packageName", JsonPrimitive(reply.packageName))
+                put("postedAt", JsonPrimitive(reply.postedAt))
+                put("target", JsonPrimitive(reply.target))
+                put("text", JsonPrimitive(reply.text))
             }
             is BrainReply.DocumentSummary -> {
                 put("type", JsonPrimitive("document_summary"))
@@ -180,7 +218,15 @@ object BrainReplyCodec {
                 )
                 "notification_list" -> BrainReply.NotificationList(
                     text("title"), stringOrNull("category"), int("totalCount"), int("unreadCount"), longOrNull("latestAt"),
-                    categoryCounts(), decodeNotificationItems(root["items"]), note()
+                    categoryCounts(), decodeNotificationItems(root["items"]), note(), root["readAloudRequested"]?.jsonPrimitive?.booleanOrNull ?: false
+                )
+                "notification_delete_confirmation" -> BrainReply.NotificationDeleteConfirmation(
+                    (root["ids"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.longOrNull }.orEmpty(),
+                    stringOrNull("category"), text("range"), longOrNull("createdAt") ?: 0L, int("totalCount")
+                )
+                "notification_reply_confirmation" -> BrainReply.NotificationReplyConfirmation(
+                    longOrNull("notificationId") ?: return null, text("packageName"), longOrNull("postedAt") ?: 0L,
+                    text("target"), text("text")
                 )
                 "document_summary" -> BrainReply.DocumentSummary(text("title"), text("summary"), text("cleanedText"), stringOrNull("sourceName"))
                 else -> null
@@ -200,7 +246,7 @@ object BrainReplyCodec {
     private fun notificationItemJson(item: ReplyNotificationItem): JsonObject = buildJsonObject {
         put("id", JsonPrimitive(item.id)); put("packageName", JsonPrimitive(item.packageName)); put("title", JsonPrimitive(item.title))
         put("text", JsonPrimitive(item.text)); put("category", JsonPrimitive(item.category)); put("postedAt", JsonPrimitive(item.postedAt))
-        put("groupName", JsonPrimitive(item.groupName)); put("duplicateCount", JsonPrimitive(item.duplicateCount)); put("isRead", JsonPrimitive(item.isRead))
+        put("groupName", JsonPrimitive(item.groupName)); put("duplicateCount", JsonPrimitive(item.duplicateCount)); put("isUnread", JsonPrimitive(item.isUnread))
     }
 
     private fun decodeStatusRows(element: JsonElement?): List<DeviceStatusRow> = (element as? JsonArray)?.mapNotNull { row ->
@@ -231,7 +277,7 @@ object BrainReplyCodec {
             postedAt = obj["postedAt"]?.jsonPrimitive?.longOrNull ?: 0L,
             groupName = obj["groupName"]?.jsonPrimitive?.contentOrNull.orEmpty(),
             duplicateCount = obj["duplicateCount"]?.jsonPrimitive?.intOrNull ?: 1,
-            isRead = obj["isRead"]?.jsonPrimitive?.booleanOrNull ?: false
+            isUnread = obj["isUnread"]?.jsonPrimitive?.booleanOrNull ?: !(obj["isRead"]?.jsonPrimitive?.booleanOrNull ?: false)
         )
     }.orEmpty()
 }
