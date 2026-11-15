@@ -111,7 +111,7 @@ object NotificationQueryParser {
         val normalized = withoutApp.lowercase().replace("what's", "what is").replace(Regex("\\bwhats\\b"), "what is")
             .replace(Regex("[^\\p{L}\\p{N}']+"), " ").trim()
         if (normalized.isEmpty()) return Outcome.Rejected("Empty query")
-        val tokens = normalized.split(Regex("\\s+").toRegex()).filter(String::isNotBlank)
+        val tokens = normalized.split(Regex("\\s+")).filter(String::isNotBlank)
         val categoryScores = mutableMapOf<Category, Int>()
         val exactCategoryCandidates = linkedSetOf<Category>()
         val actionScores = mutableMapOf<Action, Int>()

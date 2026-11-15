@@ -300,7 +300,7 @@ class BrainNotificationListener : NotificationListenerService() {
         try {
             mainHandler.removeCallbacks(idleUnbind)
             // requestUnbind must be invoked by the connected listener service itself (API 24+).
-            requestUnbind(0)
+            requestUnbind(ComponentName(applicationContext, BrainNotificationListener::class.java))
             NotificationAccessState.recordUnbind(applicationContext, reason)
             NotificationReplyRegistry.clear()
             CrashLog.record("NOTIFICATIONS", "listener requestUnbind reason=${reason.name.lowercase()}")
