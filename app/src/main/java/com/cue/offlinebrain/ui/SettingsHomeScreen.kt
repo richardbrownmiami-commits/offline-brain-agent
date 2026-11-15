@@ -75,8 +75,8 @@ fun SettingsHomeScreen(onSelect: (String) -> Unit, onBack: () -> Unit) {
     val items = listOf(
         SettingsCategory("Appearance", "Accent colour and readable chat text size", "appearance", Icons.Filled.Settings),
         SettingsCategory("Voice and speech", "Microphone, offline voice preference and spoken replies", "voice", Icons.Filled.Mic),
-        SettingsCategory("Alarms and reminders", "Add a reminder, review repeating alarms and alarm sound", "alarms", Icons.Filled.AccessTime),
-        SettingsCategory("Notifications and categories", "Saved history, live capture, filters and MIUI recovery", "notifications", Icons.Filled.Notifications),
+        SettingsCategory("Alarm settings and reminders", "Add a reminder, review repeating alarms and alarm sound", "alarms", Icons.Filled.AccessTime),
+        SettingsCategory("Notification settings", "Saved history, live capture, filters and MIUI recovery", "notifications", Icons.Filled.Notifications),
         SettingsCategory("Phrases and macros", "Teach phrases, build safe macros and open tools", "tools", Icons.Filled.TaskAlt),
         SettingsCategory("Online sources", "Weather city, news feed and optional custom API", "online", Icons.Filled.CheckCircle),
         SettingsCategory("Privacy and security", "App lock, local data and clipboard history", "privacy", Icons.Filled.CheckCircle),

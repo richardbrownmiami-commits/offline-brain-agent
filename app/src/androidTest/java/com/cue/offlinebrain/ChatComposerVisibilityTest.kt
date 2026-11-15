@@ -23,15 +23,15 @@ class ChatComposerVisibilityTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     @Test
-    fun chatComposerIsVisibleOnLaunch() {
-        composeRule.onNodeWithText("Chat").performClick()
+    fun dashboardOpensChatAndComposerIsVisible() {
         composeRule.onNodeWithTag("bottom_navigation").assertIsDisplayed()
+        composeRule.onNodeWithText("Home").performClick()
+        composeRule.onNodeWithTag("dashboard_open_chat").performClick()
         composeRule.onNodeWithTag("chat_input_bar").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_input").assertIsDisplayed()
         composeRule.onNodeWithTag("chat_input").assertHasClickAction()
         composeRule.onNodeWithTag("chat_input").performTextInput("Keyboard input test")
         composeRule.onNodeWithTag("chat_input").assertTextContains("Keyboard input test")
-        composeRule.onNodeWithTag("bottom_navigation").assertIsDisplayed()
     }
 
     @Test
@@ -41,7 +41,8 @@ class ChatComposerVisibilityTest {
             app.database.dao().addAlarm(AlarmEntity(label = "Swipe undo test", triggerAt = System.currentTimeMillis() + 3_600_000L, cron = "0 8 * * *", enabled = false))
         }
         try {
-            composeRule.onNodeWithText("Alarms").performClick()
+            composeRule.onNodeWithText("Settings").performClick()
+            composeRule.onNodeWithText("Alarm settings and reminders").performClick()
             composeRule.waitForIdle()
             composeRule.onNodeWithText("Swipe undo test").assertIsDisplayed().performTouchInput { swipeLeft() }
             composeRule.waitForIdle()

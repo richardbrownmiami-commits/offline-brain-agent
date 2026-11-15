@@ -72,28 +72,9 @@ import kotlinx.coroutines.withContext
 
 @Composable
 fun ToolsHomeScreen(vm: BrainViewModel, onSelect: (String) -> Unit, onBack: () -> Unit) {
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    var metrics by remember { mutableStateOf<List<DeviceMetric>?>(null) }
-    var metricsLoadError by remember { mutableStateOf(false) }
-    val refreshMetrics: () -> Unit = {
-        scope.launch {
-            try {
-                metrics = withContext(Dispatchers.IO) { DeviceStatusSnapshotProvider.read(context) }
-                metricsLoadError = false
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                CrashLog.record("DEVICE_STATUS", "status card snapshot could not be refreshed", error)
-                metricsLoadError = true
-            }
-        }
-    }
-    LaunchedEffect(context) { refreshMetrics() }
     FeatureScaffold("Tools", onBack) { padding ->
         Column(Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()).padding(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             AccessibilityOffBanner(vm)
-            DeviceStatusCard(metrics = metrics, loadError = metricsLoadError, onRefresh = refreshMetrics, context = context)
             FeatureCard("Help · what these tools do") {
                 Text("Tools are optional. For example, teach “weather please” to run weather, or build a macro from a few requests. Macros run only after you review and confirm them.", color = SettingsMuted, fontSize = 13.sp, lineHeight = 18.sp)
             }
